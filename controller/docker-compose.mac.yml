@@ -1,0 +1,30 @@
+# Local Mac experiment. Keep using both files for up/down/logs:
+# docker compose -f docker-compose.yml -f docker-compose.mac.yml up -d
+services:
+  echomuse-controller:
+    network_mode: !reset null
+    ports:
+      - "8767:8767"
+      - "8768:8768"
+      - "8770:8770"
+      - "16001-16010:16001-16010"
+      - "17001-17010:17001-17010"
+    environment:
+      EM_HA_LED_RING: "device"
+    volumes:
+      - ./em_esphome.py:/app/em_esphome.py:ro
+      - ./em_controller.py:/app/em_controller.py:ro
+      - ./em_led_light.py:/app/em_led_light.py:ro
+  light-test:
+    profiles: [light-test]
+    image: controller-echomuse-controller
+    command: [python, -u, /app/light_test_server.py]
+    environment:
+      SERVER_IP: ${SERVER_IP}
+      EM_HA_LED_RING: "test"
+    ports:
+      - "16099:16099"
+    volumes:
+      - ./em_esphome.py:/app/em_esphome.py:ro
+      - ./em_led_light.py:/app/em_led_light.py:ro
+      - ./tools/light_test_server.py:/app/light_test_server.py:ro
