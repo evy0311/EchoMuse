@@ -94,6 +94,7 @@ import em_arbiter
 import em_listen
 import em_button
 import em_tap_burst
+import em_led_light
 import em_esphome as esphome
 import em_ble_proxy
 import em_oww_models
@@ -867,6 +868,7 @@ class Device:
         # that heuristic breaks for every non-green scene, so newer
         # firmware trusts this flag when present and old firmware just
         # ignores the extra key.
+        esphome.release_manual_light(self.device_id)
         msg = {"type": "leds", "leds": leds}
         if listening is not None:
             msg["listening"] = listening
@@ -1052,6 +1054,7 @@ class Device:
         can no longer make the spinner judder, and a dead controller can't
         leave the ring lit.
         """
+        esphome.release_manual_light(self.device_id)
         await self.send_control({"type": "led_anim", "anim": anim})
 
     async def ping(self):
@@ -4174,6 +4177,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             ring_alarm=_ring_alarm,
             stop_alarm=_stop_alarm,
             start_conversation=_start_conversation,
+            send_led_ring=lambda pixels: em_led_light.send_to_device(device, pixels),
         )
         # The ESPHome server object caches the OWW model from server
         # creation — refresh it from the config we just loaded so HA's
