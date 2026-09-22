@@ -1,12 +1,13 @@
 """Opt-in ESPHome RGB ring experiment; the state describes manual commands.
 
-The firmware owns mute/volume overlays. Voice/timer commands relinquish manual
-ownership; this is not hardware readback. Effects run on the device. No persistence or fades yet.
+The firmware owns mute/volume overlays. Voice/timer commands temporarily override
+the saved manual setting; this is not hardware readback. Effects run on the device. No persistence or fades yet.
 """
 from dataclasses import dataclass, replace
 import asyncio
 import math
 import colorsys
+import logging
 
 from esphome.vendor import api_pb2 as pb
 
@@ -114,32 +115,96 @@ class RingLight:
         self.animation_sender = None
         self.revision = 0
         self.lock = asyncio.Lock()
+        self.ready = lambda: True
+        self.suspended = False
+        self.overlay_revision = 0
+        self._restore_task = None
+
+    def _cancel_restore(self):
+        if self._restore_task is not None:
+            self._restore_task.cancel()
+            self._restore_task = None
+
+    def suspend(self):
+        """Status LEDs take the physical ring, retaining HA's desired setting."""
+        self.overlay_revision += 1
+        self.suspended = True
+        self._cancel_restore()
 
     def release(self):
+        """Device lifecycle reset; ordinary voice overlays use suspend()."""
+        self._cancel_restore()
+        self.suspended = False
         self.revision += 1
         changed = self.state.state
         self.state = replace(self.state, state=False)
         return changed
 
+    async def _write(self, state):
+        if self.sender is None:
+            raise RuntimeError('LED device is disconnected')
+        animation = state.animation()
+        if animation is not None:
+            if self.animation_sender is None:
+                raise RuntimeError('Device does not support LED animations')
+            await self.animation_sender(animation)
+        else:
+            await self.sender(state.pixels())
+
     async def command(self, msg, *, test=False):
-        # Serialise slider updates; fold partial commands against the last
-        # successful command, retaining colour and brightness across off/on.
+        # HA tracks desired state while voice/timer/mute owns the ring. A
+        # queued off or colour change supersedes the pre-conversation setting.
         async with self.lock:
             proposed = self.state.command(msg)
             revision = self.revision
             if not test:
                 if self.sender is None:
                     raise RuntimeError('LED device is disconnected')
-                animation = proposed.animation()
-                if animation is not None:
-                    if self.animation_sender is None:
-                        raise RuntimeError('Device does not support LED animations')
-                    await self.animation_sender(animation)
-                else:
-                    await self.sender(proposed.pixels())
+                if proposed.animation() is not None and self.animation_sender is None:
+                    raise RuntimeError('Device does not support LED animations')
+                if not self.suspended:
+                    await self._write(proposed)
             if revision == self.revision:
                 self.state = proposed
             return self.state.response()
+
+    async def restore(self):
+        """Repaint the latest desired state only when status LEDs are finished."""
+        async with self.lock:
+            if not self.suspended:
+                return True
+            if not self.ready():
+                return False
+            revision, overlay = self.revision, self.overlay_revision
+            await self._write(self.state)
+            if revision == self.revision and overlay == self.overlay_revision:
+                self.suspended = False
+                return True
+            return False
+
+    def schedule_restore(self, delay=0):
+        if not self.suspended or self._restore_task is not None:
+            return
+
+        async def resume_when_idle():
+            try:
+                # Always yield: cleanup may still own voice_lock. Outcome
+                # cues retain their full TTL before a manual light returns.
+                await asyncio.sleep(delay)
+                while not await self.restore():
+                    await asyncio.sleep(0.1)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logging.getLogger('echomuse.esphome.light').exception(
+                    'Could not restore manual LED ring setting')
+
+        task = asyncio.create_task(resume_when_idle())
+        self._restore_task = task
+        def finished(done):
+            if self._restore_task is done:
+                self._restore_task = None
+        task.add_done_callback(finished)
 
 
 async def send_to_device(device, pixels):

@@ -136,8 +136,10 @@ class RingTests(unittest.IsolatedAsyncioTestCase):
             states=list(new.handle_message(pb.SubscribeStatesRequest()))
             self.assertTrue(next(m for m in states if isinstance(m,pb.LightStateResponse)).state)
             with patch.dict(esp._servers, {srv.device_id: srv}):
-                esp.release_manual_light(srv.device_id)
-            self.assertFalse(responses[-1].state)
+                esp.suspend_manual_light(srv.device_id)
+            self.assertTrue(srv.light.state.state)
+            self.assertTrue(srv.light.suspended)
+            srv.light.release()
             srv.light.sender = None
             await new._light_command(command(has_state=True, state=True))
             self.assertFalse(responses[-1].state)
@@ -224,6 +226,127 @@ class RingTests(unittest.IsolatedAsyncioTestCase):
         device.led_anim_capable=False
         with self.assertRaises(RuntimeError):
             await light.send_animation_to_device(device,anim)
+
+    async def test_suspended_commands_update_desired_state_without_painting(self):
+        ring=light.RingLight(); ring.sender=AsyncMock(); ring.animation_sender=AsyncMock()
+        await ring.command(command(has_state=True,state=True,has_rgb=True,red=1))
+        ring.sender.reset_mock()
+        ring.suspend()
+        await ring.command(command(has_effect=True,effect='Breathe',has_brightness=True,brightness=0.3))
+        ring.sender.assert_not_called(); ring.animation_sender.assert_not_called()
+        self.assertTrue(ring.state.state)
+        await ring.restore()
+        self.assertEqual(ring.animation_sender.call_args.args[0]['pattern'],'pulse')
+        self.assertEqual(ring.animation_sender.call_args.args[0]['colors'][0],[77,0,0])
+        ring.suspend()
+        await ring.command(command(has_state=True,state=False))
+        await ring.restore()
+        self.assertTrue(all(p['r']==p['g']==p['b']==0 for p in ring.sender.call_args.args[0]))
+
+    async def test_restore_waits_and_old_cleanup_cannot_interrupt_new_turn(self):
+        ring=light.RingLight(); ring.sender=AsyncMock()
+        await ring.command(command(has_state=True,state=True)); ring.sender.reset_mock()
+        busy=True
+        ring.ready=lambda: not busy
+        ring.suspend(); ring.schedule_restore()
+        old_task=ring._restore_task
+        await asyncio.sleep(0)
+        ring.sender.assert_not_called()
+        ring.suspend()
+        await asyncio.sleep(0)
+        self.assertTrue(old_task.cancelled())
+        busy=False
+        ring.schedule_restore()
+        await asyncio.wait_for(ring._restore_task,1)
+        ring.sender.assert_awaited_once()
+        self.assertFalse(ring.suspended)
+
+    async def test_outcome_cue_delay_is_not_shortened_by_outer_cleanup(self):
+        ring=light.RingLight();ring.sender=AsyncMock()
+        ring.suspend();ring.schedule_restore(delay=0.05)
+        cue_task=ring._restore_task
+        ring.schedule_restore()
+        self.assertIs(cue_task,ring._restore_task)
+        await asyncio.sleep(0.01)
+        ring.sender.assert_not_called()
+        await asyncio.wait_for(cue_task,1)
+        ring.sender.assert_awaited_once()
+
+    async def test_disconnect_cancels_pending_restore(self):
+        ring=light.RingLight();ring.sender=AsyncMock()
+        ring.suspend();ring.schedule_restore(delay=0.05)
+        task=ring._restore_task
+        ring.release();ring.sender=None
+        await asyncio.sleep(0)
+        self.assertTrue(task.cancelled())
+        self.assertFalse(ring.state.state)
+        self.assertFalse(ring.suspended)
+
+    async def test_real_controller_voice_cleanup_restores_manual_light(self):
+        import em_controller as ctl
+        for scenario in ('normal','pattern','off_during_turn','colour_during_turn',
+                         'continuation','barge','error','early_error','cancel'):
+            with self.subTest(scenario=scenario):
+                srv=server()
+                ws=SimpleNamespace(send=AsyncMock())
+                device=ctl.Device(srv.device_id,'127.0.0.1',['leds','led_anim'],ws)
+                ring=srv.light
+                ring.sender=lambda pixels: light.send_to_device(device,pixels)
+                ring.animation_sender=lambda anim: light.send_animation_to_device(device,anim)
+                ring.ready=lambda: not (device.voice_lock.locked() or device.timer_alarm_ringing or device.muted)
+                initial=command(has_state=True,state=True,has_rgb=True,red=1,green=0,blue=0,
+                                has_brightness=True,brightness=0.4)
+                if scenario=='pattern':
+                    initial.has_effect=True;initial.effect='Spin'
+                await ring.command(initial)
+                initial_state=ring.state
+                calls=0
+                async def run_turn(**kwargs):
+                    nonlocal calls
+                    calls+=1
+                    self.assertTrue(ring.suspended)
+                    self.assertTrue(device.voice_lock.locked())
+                    if scenario=='off_during_turn':
+                        await ring.command(command(has_state=True,state=False))
+                    if scenario=='colour_during_turn':
+                        await ring.command(command(has_rgb=True,red=0,green=0,blue=1))
+                    if scenario=='barge' and calls==1:
+                        device.barge_detected=True
+                    if scenario=='error':
+                        raise OSError('pipeline failed')
+                    if scenario=='cancel':
+                        raise asyncio.CancelledError()
+                    return scenario=='continuation' and calls==1
+                with patch.dict(esp._servers,{srv.device_id:srv}), \
+                     patch.object(esp,'HA_LED_RING_MODE','device'), \
+                     patch.object(esp,'trigger_voice_turn',side_effect=run_turn), \
+                     patch.object(ctl,'_push_device_state',new=AsyncMock(
+                         side_effect=RuntimeError('early failure') if scenario=='early_error' else None)), \
+                     patch.object(ctl.em_player,'interrupt',new=AsyncMock()), \
+                     patch.object(ctl.em_player,'resume_interrupted',new=AsyncMock()):
+                    if scenario in ('error','early_error','cancel'):
+                        with self.assertRaises((OSError,RuntimeError,asyncio.CancelledError)):
+                            await ctl._run_voice_locked(device,is_wakeword=True)
+                    else:
+                        await ctl._run_voice_locked(device,is_wakeword=True)
+                    self.assertIsNotNone(ring._restore_task)
+                    await asyncio.wait_for(ring._restore_task,1)
+                self.assertFalse(ring.suspended)
+                self.assertEqual(calls,2 if scenario in ('continuation','barge') else
+                                 (0 if scenario=='early_error' else 1))
+                if scenario not in ('off_during_turn','colour_during_turn'):
+                    self.assertEqual(ring.state,initial_state)
+                frames=[json.loads(c.args[0]) for c in ws.send.call_args_list]
+                frames=[m for m in frames if m['type'] in ('leds','led_anim')]
+                last=frames[-1]
+                if scenario=='pattern':
+                    self.assertEqual(last['anim'],initial_state.animation())
+                elif scenario=='off_during_turn':
+                    self.assertTrue(all(p['r']==p['g']==p['b']==0 for p in last['leds']))
+                elif scenario=='colour_during_turn':
+                    self.assertEqual(last['leds'][0],{'id':0,'r':0,'g':0,'b':102})
+                else:
+                    self.assertEqual(last['leds'],initial_state.pixels())
 
     async def test_opt_in_and_capability_gate(self):
         srv = server(); sat=srv._protocol_factory()

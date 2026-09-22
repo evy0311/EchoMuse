@@ -58,14 +58,18 @@ The new callback sends the existing `leds` control message to all twelve LEDs
 with `listening=false`. It scales the RGB channels by brightness and colour
 brightness. It does not require a device firmware modification.
 
-Manual writes are refused during voice turns, timer alarms and microphone
-mute. Existing controller LED/animation commands relinquish manual ownership
-and report this light off. Firmware retains control over mute/volume overlays.
-The HA state describes the last accepted manual command, not LED hardware
+Manual colour, brightness, on/off and effect settings are retained while voice,
+timer and mute indications temporarily own the ring. HA shows the requested
+manual state throughout. Changes made in HA during an override update the
+setting that will resume, including an explicit off command. Restoration waits
+until the full conversation (including follow-ups and barge-in), timer or mute
+has ended. Brief outcome cues keep their full display time before restoration.
+A new status frame cancels any stale restoration task. Firmware retains control over mute/volume overlays.
+The HA state describes the saved manual setting, not LED hardware
 readback; firmware-only overlays may differ temporarily. There is no device
 acknowledgment for an LED frame. A failed socket write does not store a new
 state. HA reconnects retain the manual state; device reconnects and controller
-restarts reset it. Effects: None (solid), Spin, Slow spin, Pulse, Breathe, Rainbow, and Echo red.
+restarts reset it. Set the desired light again once after installing an update. Effects: None (solid), Spin, Slow spin, Pulse, Breathe, Rainbow, and Echo red.
 Spin/Pulse/Breathe follow the selected colour and brightness; Rainbow uses its
 own palette and follows brightness. Animated effects require led_anim capability
 and run on the device until off, a controller status animation, or device-link
@@ -111,8 +115,9 @@ that move. If the Mac's DHCP address changes, update SERVER_IP and endpoints.
 
 - Controller startup: running, no restart loop, dashboard HTTP 200 through
   localhost and the Mac LAN address.
-- 131 selected tests passed: 15 light integration tests plus existing host-IP,
-  capability, ESPHome identity/ports, volume, timer and wake-ring tests.
+- 201 selected tests plus 9 voice-turn scenarios passed: 20 light integration
+  tests plus host-IP, capability, ESPHome identity/ports, volume, timer, wake-ring,
+  voice cleanup, announcement, interruption and conversation tests.
 - Real aioesphomeapi 45.3.1 client through the Mac's published port: entity
   discovery, RGB mode, on/off, brightness, colour, state feedback and reconnect.
 - Physical Dot / HA solid RGB: user confirmed working on Garage (2026-09-22).

@@ -3173,6 +3173,7 @@ async def device_connected(
     start_conversation=None,
     send_led_ring=None,
     send_led_ring_animation=None,
+    led_ring_ready=None,
 ) -> None:
     """
     Called by em_controller.handle_control() when an Echo Dot connects.
@@ -3217,6 +3218,7 @@ async def device_connected(
         server = await _register_device_server(device_id, row["label"])
     server.light.sender = send_led_ring
     server.light.animation_sender = send_led_ring_animation
+    server.light.ready = led_ring_ready or (lambda: True)
     server.light.release()
     server._standalone_play = standalone_play
     server._send_volume_set = send_volume_set
@@ -3259,13 +3261,17 @@ async def device_disconnected(device_id: str) -> None:
     log.info(f"[esphome.{device_id[-8:]}] ESPHome port {server.port} down (device disconnected)")
 
 
-def release_manual_light(device_id: str) -> None:
-    """Voice/timer/status LEDs take ownership from the experimental HA light."""
+def suspend_manual_light(device_id: str) -> None:
+    """Status LEDs temporarily own the ring; HA continues to show desired state."""
     server = _servers.get(device_id)
-    if server is not None and server.light.release():
-        satellite = server.get_satellite()
-        if satellite is not None and satellite._led_light_enabled:
-            satellite._send_one(server.light.state.response())
+    if server is not None and HA_LED_RING_MODE == "device":
+        server.light.suspend()
+
+
+def resume_manual_light(device_id: str, delay: float = 0) -> None:
+    server = _servers.get(device_id)
+    if server is not None and HA_LED_RING_MODE == "device":
+        server.light.schedule_restore(delay)
 
 
 def set_device_capabilities(device_id: str, caps: list[str]) -> None:
