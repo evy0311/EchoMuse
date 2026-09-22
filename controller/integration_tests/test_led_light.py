@@ -142,6 +142,89 @@ class RingTests(unittest.IsolatedAsyncioTestCase):
             await new._light_command(command(has_state=True, state=True))
             self.assertFalse(responses[-1].state)
 
+    async def test_pattern_specs_and_brightness(self):
+        ring = light.RingLight()
+        ring.sender = AsyncMock()
+        ring.animation_sender = AsyncMock()
+        for effect, pattern, period in [('Spin', 'spin', 100), ('Slow spin', 'spin', 250),
+                                        ('Pulse', 'pulse', 1200), ('Breathe', 'pulse', 3000),
+                                        ('Rainbow', 'rotate', 120)]:
+            response = await ring.command(command(has_state=True, state=True,
+                has_effect=True, effect=effect, has_rgb=True, red=1, green=0, blue=0,
+                has_brightness=True, brightness=0.5))
+            anim = ring.animation_sender.call_args.args[0]
+            self.assertEqual((anim['pattern'], anim['periodMs']), (pattern, period))
+            self.assertFalse(anim['listening'])
+            self.assertEqual(response.effect, effect)
+            self.assertEqual(anim['colors'][0], [128, 0, 0])
+            if effect == 'Rainbow':
+                self.assertEqual(len(anim['colors']), 12)
+                self.assertEqual(anim['colors'][4], [0, 128, 0])
+                self.assertEqual(anim['colors'][8], [0, 0, 128])
+        ring.sender.assert_not_called()
+
+    async def test_off_and_none_cancel_animation_with_solid_frame(self):
+        ring=light.RingLight(); ring.sender=AsyncMock(); ring.animation_sender=AsyncMock()
+        await ring.command(command(has_state=True,state=True,has_effect=True,effect='Spin'))
+        await ring.command(command(has_state=True,state=False))
+        self.assertTrue(all(p['r']==p['g']==p['b']==0 for p in ring.sender.call_args.args[0]))
+        await ring.command(command(has_state=True,state=True))
+        self.assertEqual(ring.animation_sender.await_count,2)
+        await ring.command(command(has_effect=True,effect='None'))
+        self.assertEqual(ring.state.effect,'None')
+        self.assertEqual(ring.sender.call_args.args[0][0]['r'],255)
+
+    async def test_exact_echo_red_reference_and_leaving_preset(self):
+        ring=light.RingLight(); ring.sender=AsyncMock()
+        await ring.command(command(has_brightness=True,brightness=0.1,
+                                   has_color_brightness=True,color_brightness=0.2))
+        response=await ring.command(command(has_state=True,state=True,has_effect=True,effect='Echo red'))
+        self.assertEqual(ring.sender.call_args.args[0],
+                         [{'id':i,'r':180,'g':0,'b':0} for i in range(12)])
+        self.assertAlmostEqual(response.brightness,180/255,places=6)
+        self.assertEqual(response.color_brightness,1)
+        await ring.command(command(has_brightness=True,brightness=1))
+        self.assertEqual(ring.state.effect,'None')
+        self.assertEqual(ring.sender.call_args.args[0][0]['r'],255)
+
+    async def test_animation_failures_leave_state_unchanged(self):
+        ring=light.RingLight(); ring.sender=AsyncMock()
+        for sender in (None,AsyncMock(side_effect=OSError('closed'))):
+            ring.animation_sender=sender
+            with self.assertRaises((RuntimeError,OSError)):
+                await ring.command(command(has_state=True,state=True,has_effect=True,effect='Spin'))
+            self.assertFalse(ring.state.state)
+            self.assertEqual(ring.state.effect,'None')
+        with self.assertRaises(ValueError):
+            await ring.command(command(has_effect=True,effect='unknown'),test=True)
+
+    async def test_effects_are_advertised_by_capability(self):
+        srv=server();sat=srv._protocol_factory()
+        with patch.object(esp,'HA_LED_RING_MODE','device'):
+            for caps,effects in [(['leds'],light.STATIC_EFFECTS),
+                                 (['leds','led_anim'],light.EFFECTS)]:
+                srv.set_capabilities(caps)
+                info=next(m for m in sat.handle_message(pb.ListEntitiesRequest())
+                          if isinstance(m,pb.ListEntitiesLightResponse))
+                self.assertEqual(tuple(info.effects),effects)
+        self.assertEqual(tuple(light.entity(test=True).effects),light.EFFECTS)
+
+    async def test_animation_callback_guards_and_wire_message(self):
+        device=SimpleNamespace(voice_lock=asyncio.Lock(),timer_alarm_ringing=False,
+            muted=False,led_anim_capable=True,control_ws=SimpleNamespace(send=AsyncMock()))
+        anim=light.RingState(state=True,effect='Breathe').animation()
+        await light.send_animation_to_device(device,anim)
+        self.assertEqual(json.loads(device.control_ws.send.call_args.args[0]),
+                         {'type':'led_anim','anim':anim})
+        for flag in ('muted','timer_alarm_ringing'):
+            setattr(device,flag,True)
+            with self.assertRaises(RuntimeError):
+                await light.send_animation_to_device(device,anim)
+            setattr(device,flag,False)
+        device.led_anim_capable=False
+        with self.assertRaises(RuntimeError):
+            await light.send_animation_to_device(device,anim)
+
     async def test_opt_in_and_capability_gate(self):
         srv = server(); sat=srv._protocol_factory()
         for mode, caps, expected in [('off',['leds'],False),('device',[],False),

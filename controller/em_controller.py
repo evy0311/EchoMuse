@@ -4178,6 +4178,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             stop_alarm=_stop_alarm,
             start_conversation=_start_conversation,
             send_led_ring=lambda pixels: em_led_light.send_to_device(device, pixels),
+            send_led_ring_animation=lambda anim: em_led_light.send_animation_to_device(device, anim),
         )
         # The ESPHome server object caches the OWW model from server
         # creation — refresh it from the config we just loaded so HA's

@@ -531,7 +531,14 @@ class EchoMuseSatellite(SatelliteServerProtocol):
     async def _light_command(self, msg):
         ring = self._owning_server.light
         try:
+            if (HA_LED_RING_MODE == "device" and not self._device_has("led_anim")
+                    and msg.has_effect and msg.effect in em_led_light.ANIMATED_EFFECTS):
+                raise ValueError("Device does not advertise LED animations")
             await ring.command(msg, test=HA_LED_RING_MODE == "test")
+            pixel = ring.state.pixels()[0]
+            log.debug("[%s] LED ring: on=%s effect=%s brightness=%.3f rgb=(%s,%s,%s)",
+                      self._log_name, ring.state.state, ring.state.effect,
+                      ring.state.brightness, pixel['r'], pixel['g'], pixel['b'])
         except (ValueError, RuntimeError, OSError) as exc:
             log.warning("[%s] LED ring command rejected: %s", self._log_name, exc)
         except Exception:
@@ -647,7 +654,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     state_class=1,   # STATE_CLASS_MEASUREMENT
                 )
             if self._led_light_enabled:
-                yield em_led_light.entity(test=HA_LED_RING_MODE == "test")
+                yield em_led_light.entity(test=HA_LED_RING_MODE == "test",
+                                          animated=self._device_has("led_anim"))
             yield api_pb2.ListEntitiesDoneResponse()
             return
 
@@ -3164,6 +3172,7 @@ async def device_connected(
     stop_alarm=None,
     start_conversation=None,
     send_led_ring=None,
+    send_led_ring_animation=None,
 ) -> None:
     """
     Called by em_controller.handle_control() when an Echo Dot connects.
@@ -3207,6 +3216,7 @@ async def device_connected(
             return
         server = await _register_device_server(device_id, row["label"])
     server.light.sender = send_led_ring
+    server.light.animation_sender = send_led_ring_animation
     server.light.release()
     server._standalone_play = standalone_play
     server._send_volume_set = send_volume_set
@@ -3232,6 +3242,7 @@ async def device_disconnected(device_id: str) -> None:
     if server is None:
         return
     server.light.sender = None
+    server.light.animation_sender = None
     server.light.release()
     if server._server is None:
         log.debug(f"[esphome.{device_id[-8:]}] device_disconnected: port already down")

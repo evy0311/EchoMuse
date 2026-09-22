@@ -47,7 +47,7 @@ The lab is left running and its simulated light is off. It allows one client
 connection at a time, matching the real controller. Disconnect HA before
 running the standalone smoke test.
 
-## Checkpoint 3: physical ring path implemented, hardware test pending
+## Checkpoint 3: physical RGB confirmed; patterns ready to compare
 
 The Mac override enables `EM_HA_LED_RING=device` on the real controller.
 A connected Dot advertising `leds` gets the entity **LED Ring** at stable key 4.
@@ -65,11 +65,35 @@ The HA state describes the last accepted manual command, not LED hardware
 readback; firmware-only overlays may differ temporarily. There is no device
 acknowledgment for an LED frame. A failed socket write does not store a new
 state. HA reconnects retain the manual state; device reconnects and controller
-restarts reset it. Effects/flash are unsupported; transitions apply immediately.
+restarts reset it. Effects: None (solid), Spin, Slow spin, Pulse, Breathe, Rainbow, and Echo red.
+Spin/Pulse/Breathe follow the selected colour and brightness; Rainbow uses its
+own palette and follows brightness. Animated effects require led_anim capability
+and run on the device until off, a controller status animation, or device-link
+disconnect. They use no TTL, matching a continuously-on manual light; the
+firmware stops animations when the control link disconnects. Existing voice
+animation TTLs are unchanged. Flash is unsupported; transitions apply immediately.
+Echo red is a colour reference, not microphone mute: it sets pure red and
+brightness 180/255 to match the firmware mute ring exactly. Subsequent colour or
+brightness edits leave that reference preset. No unmeasured colour correction
+was applied; ordinary RGB remains a direct linear mapping.
 
-No physical device was moved or reconfigured. To finish the hardware test,
-provide the HA URL/IP, target Dot identity/IP and its current controller.
-Back up its existing endpoint/credentials before switching one test Dot.
+Garage (G090LF1182231QPH, 192.168.68.152, firmware v2.16.0) was temporarily
+moved from the original controller at 192.168.68.103 to the Mac after backing
+up its settings on-device. Its original TLS credentials were retained and the
+Mac CA was added alongside the original CA. The user confirmed physical RGB
+control through HA. A device-local 15-minute return timer was armed; the user
+explicitly requested keeping that timer unchanged while patterns were added.
+No firmware flash was performed. The test controller's normal connection-time
+reconciliation did install its missing Silero VAD model, as shown in its logs.
+
+The physical test entry uses 192.168.68.135:16001. The original HA entry used
+192.168.68.103:16004. If the existing HA entry was reconfigured for testing,
+restore its original host/port after the Dot returns; the device timer cannot
+reconfigure HA. The original controller's device record was preserved.
+
+New patterns require visual confirmation on the physical ring. Echo red is an
+exact firmware RGB-value reference, not a claim that perceived colour has
+been calibrated. Select None to return to ordinary solid colour.
 
 This Mac setup publishes ports 8767, 8768, 8770, 16001–16010 and 17001–17010.
 Port 16099 belongs only to the isolated lab. Real devices use their own assigned
@@ -87,11 +111,12 @@ that move. If the Mac's DHCP address changes, update SERVER_IP and endpoints.
 
 - Controller startup: running, no restart loop, dashboard HTTP 200 through
   localhost and the Mac LAN address.
-- 125 selected tests passed: 9 new light integration tests plus existing host-IP,
+- 131 selected tests passed: 15 light integration tests plus existing host-IP,
   capability, ESPHome identity/ports, volume, timer and wake-ring tests.
 - Real aioesphomeapi 45.3.1 client through the Mac's published port: entity
   discovery, RGB mode, on/off, brightness, colour, state feedback and reconnect.
-- Physical Dot and actual Home Assistant UI: pending.
+- Physical Dot / HA solid RGB: user confirmed working on Garage (2026-09-22).
+- Physical pattern appearance and Echo red comparison: awaiting user observation.
 
 The initial regression attempt omitted the device source from its container
 mount. Rerunning with the full repository mounted resolved those file-not-found

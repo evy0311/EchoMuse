@@ -41,6 +41,16 @@ async def main(host, port):
         state = await next_state()
         assert state.state and abs(state.brightness - 0.25) < 0.001
         print('PASS: state retained across HA client reconnect')
+        expected_effects = {'None', 'Echo red', 'Spin', 'Slow spin', 'Pulse', 'Breathe', 'Rainbow'}
+        assert set(lights[0].effects) == expected_effects
+        for effect in sorted(expected_effects):
+            client.light_command(4, state=True, effect=effect)
+            state = await next_state()
+            assert state.effect == effect
+            if effect == 'Echo red':
+                assert (state.red, state.green, state.blue) == (1, 0, 0)
+                assert abs(state.brightness - 180/255) < 0.001
+        print('PASS: all effects discovered and acknowledged; exact Echo red reference')
         client.light_command(4, state=False)
         state = await next_state()
         assert not state.state
