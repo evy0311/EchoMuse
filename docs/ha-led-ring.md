@@ -28,17 +28,17 @@ one-shot `flash` parameter.
 
 ## Lifetime and priority
 
-**Every on command expires after 60 seconds.** This applies to solid colours
-too. A subsequent accepted light command renews that window while the light is
-on. A persistent household indicator should repeat its command every 30 seconds.
-Ordinary HA keepalives, HA reconnects and voice cleanup do not renew it. This
-keeps the firmware's `ttlSec` dead-man switch effective if HA or the controller
-stops sending commands. HA reports the light off when the lease expires.
+**The light stays on until HA turns it off.** Every device pattern, including
+solid colours, has a 60-second `ttlSec`. The controller resends the setting
+every 30 seconds while the light is on and HA is connected. No renewal automation
+is needed. Renewal stops when HA disconnects; if HA or the controller goes away,
+the device clears the indicator within a minute of the last renewal.
 
 Listening, thinking, response playback, outcome cues and timer alarms take the
 ring immediately. Microphone mute and the physical volume arc remain owned by
-the firmware. A still-valid light setting resumes after those indications end,
-with only the remaining timeout. It cannot come back after its lease expires.
+the firmware. The requested light setting resumes with a fresh 60-second TTL
+after those indications end, even after a long voice turn. Renewal preserves the
+pending setting during an override without writing over the status indication.
 HA changes made during an override update the pending setting; an off command
 cancels it without clearing the higher-priority indication.
 
@@ -46,12 +46,13 @@ The HA entity reports the requested ambient setting, including while a status
 indication temporarily covers it. It is not LED hardware readback: the existing
 protocol has no display acknowledgement. Failed socket writes retain the last
 accepted state. Device reconnects and controller restarts clear the setting;
-an HA reconnect preserves only its remaining lifetime.
+an HA reconnect resumes renewal if the previous lease has not yet expired.
+An expired setting stays off until HA turns it on again.
 
 ## Example: keep an alarm indicator current
 
 Replace the example entities with your helper and EchoMuse light. This updates
-immediately when the helper changes and renews it every 30 seconds while active.
+immediately when the helper changes. The controller renews it while active.
 Turning the helper off clears it immediately; if HA stops, it expires on-device.
 
 ```yaml
@@ -59,8 +60,6 @@ alias: EchoMuse idle alarm indicator
 triggers:
   - trigger: state
     entity_id: input_boolean.alarm_indicator
-  - trigger: time_pattern
-    seconds: "/30"
   - trigger: homeassistant
     event: start
 actions:
@@ -84,5 +83,5 @@ actions:
 mode: restart
 ```
 
-For a single notification, call `light.turn_on` once. Call `light.turn_off` after
-a shorter delay if desired; otherwise the 60-second timeout clears it.
+For a temporary notification, call `light.turn_on`, then call `light.turn_off`
+after the desired delay.

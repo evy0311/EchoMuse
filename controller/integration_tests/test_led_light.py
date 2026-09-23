@@ -44,7 +44,7 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.srv.set_capabilities(['leds', 'led_anim', 'button_hold', 'ambient_light'])
         messages = list(self.sat.handle_message(pb.ListEntitiesRequest()))
         entities = [m for m in messages if not isinstance(m, pb.ListEntitiesDoneResponse)]
-        self.assertEqual([m.key for m in entities], [1, 2, 3, 4])
+        self.assertEqual([m.key for m in entities], [1, 2, 3, 6])
         info = entities[-1]
         self.assertIsInstance(info, pb.ListEntitiesLightResponse)
         self.assertEqual(info.object_id, 'led_ring')
@@ -77,6 +77,7 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(anim['pattern'], 'solid')
         self.assertEqual(anim['ttlSec'], 60)
         self.assertTrue(self.responses[-1].state)
+        self.assertEqual(self.responses[-1].key, 6)
         await self.sat._light_command(command(has_effect=True, effect='Pulse'))
         self.assertEqual(self.responses[-1].effect, 'Pulse')
         self.assertEqual(self.responses[-1].brightness, 0.25)
@@ -101,7 +102,7 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.responses[-1].state)
 
     async def test_unknown_key_and_subdevice_are_ignored(self):
-        for field, value in [('key', 99), ('device_id', 1)]:
+        for field, value in [('key', 4), ('key', 5), ('key', 99), ('device_id', 1)]:
             msg = command(has_state=True, state=True)
             setattr(msg, field, value)
             list(self.sat.handle_message(msg))
@@ -123,21 +124,37 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.responses[-1].state)
         self.srv.light.sender.assert_awaited_once()
 
-    async def test_ha_reconnect_does_not_renew_and_stale_clients_cannot_write(self):
+    async def test_ha_disconnect_stops_renewal_and_reconnect_resumes_it(self):
         self.srv.light.clock = lambda: 100
         await self.sat._light_command(command(has_state=True, state=True))
         deadline = self.srv.light.expires_at
+        task = self.srv.light._renew_task
         self.srv._on_satellite_disconnected(self.sat)
+        await asyncio.sleep(0)
+        self.assertTrue(task.cancelled())
+        self.srv.light.clock = lambda: 120
+        await self.srv.light.renew()
+        self.srv.light.sender.assert_awaited_once()
+        self.assertEqual(self.srv.light.expires_at, deadline)
         new = self.srv._protocol_factory()
         new._send_one = self.responses.append
         states = list(new.handle_message(pb.SubscribeStatesRequest()))
         self.assertTrue(next(m for m in states if isinstance(m, pb.LightStateResponse)).state)
-        self.assertEqual(self.srv.light.expires_at, deadline)
+        await asyncio.sleep(0)
+        self.assertEqual(self.srv.light.sender.await_count, 2)
+        self.assertEqual(self.srv.light.expires_at, 180)
+        renewal = self.srv.light._renew_task
+        self.srv._on_satellite_disconnected(self.sat)
+        self.assertIs(self.srv.light._renew_task, renewal)
         await self.sat._light_command(command(has_state=True, state=False))
         self.assertTrue(self.srv.light.state.state)
-        self.srv.light.clock = lambda: 160
+        self.srv._on_satellite_disconnected(new)
+        self.srv.light.clock = lambda: 180
         self.srv.light._expire()
-        self.assertFalse(self.responses[-1].state)
+        newest = self.srv._protocol_factory()
+        states = list(newest.handle_message(pb.SubscribeStatesRequest()))
+        self.assertFalse(next(m for m in states if isinstance(m, pb.LightStateResponse)).state)
+        self.assertIsNone(self.srv.light._renew_task)
 
     async def test_ha_disconnect_cancels_queued_command(self):
         await self.srv.light.lock.acquire()
@@ -184,10 +201,10 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
 
 
 class VoiceIntegrationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_real_controller_voice_cleanup_restores_only_unexpired_settings(self):
+    async def test_real_controller_voice_cleanup_restores_requested_settings(self):
         import em_controller as ctl
         for scenario in ('normal', 'pattern', 'off_during_turn', 'colour_during_turn',
-                         'continuation', 'barge', 'error', 'early_error', 'cancel', 'expired'):
+                         'continuation', 'barge', 'error', 'early_error', 'cancel', 'long_turn'):
             with self.subTest(scenario=scenario):
                 srv = server()
                 ws = SimpleNamespace(send=AsyncMock())
@@ -198,6 +215,7 @@ class VoiceIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 ring.sender = lambda anim: light.send_animation_to_device(device, anim)
                 ring.ready = lambda: not (device.voice_lock.locked() or
                                            device.timer_alarm_ringing or device.muted)
+                ring.set_connected(True)
                 await ring.command(state=True, red=1, green=0, blue=0, brightness=0.4,
                                    effect='Spin' if scenario == 'pattern' else 'None')
                 initial_state = ring.state
@@ -212,8 +230,10 @@ class VoiceIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         await ring.command(state=False)
                     if scenario == 'colour_during_turn':
                         await ring.command(red=0, green=0, blue=1)
-                    if scenario == 'expired':
-                        now += 61
+                    if scenario == 'long_turn':
+                        for _ in range(4):
+                            now += 30
+                            await ring.renew()
                     if scenario == 'barge' and calls == 1:
                         device.barge_detected = True
                     if scenario == 'error':
@@ -242,7 +262,7 @@ class VoiceIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     animations = [json.loads(c.args[0])['anim'] for c in ws.send.call_args_list
                                   if json.loads(c.args[0])['type'] == 'led_anim']
                     last = animations[-1]
-                    if scenario in ('off_during_turn', 'expired'):
+                    if scenario == 'off_during_turn':
                         self.assertFalse(ring.state.state)
                         self.assertEqual(last['pattern'], 'off')
                     elif scenario == 'colour_during_turn':

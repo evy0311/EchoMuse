@@ -2537,6 +2537,7 @@ class DeviceESPhomeServer:
             owning_server=self,
         )
         self._active_satellite = satellite
+        self.light.set_connected(True)
         log.info(f"[esphome.{self.device_id[-8:]}] HA connected on port {self.port}")
         return satellite
 
@@ -2545,6 +2546,7 @@ class DeviceESPhomeServer:
             task.cancel()
         if self._active_satellite is satellite:
             self._active_satellite = None
+            self.light.set_connected(False)
             log.info(f"[esphome.{self.device_id[-8:]}] HA disconnected")
 
     async def start(self, host: str) -> None:
@@ -3247,6 +3249,7 @@ async def device_connected(
     server.light.sender = send_led_ring_animation
     server.light.ready = led_ring_ready or (lambda: True)
     server.light.release()
+    server.light.set_connected(server.get_satellite() is not None)
     server._publish_light_state(server.light.state)
     server._standalone_play = standalone_play
     server._send_volume_set = send_volume_set
