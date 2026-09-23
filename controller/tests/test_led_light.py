@@ -25,7 +25,7 @@ class StateTests(unittest.TestCase):
     def test_all_native_patterns_have_ttl_and_never_claim_listening(self):
         expected = {'None': 'solid', 'Spin': 'spin', 'Slow spin': 'spin',
                     'Rotate': 'rotate', 'Pulse': 'pulse', 'Breathe': 'pulse',
-                    'Rainbow': 'rotate', 'Meter': 'meter'}
+                    'Rainbow': 'rotate'}
         self.assertEqual(set(light.EFFECTS), set(expected))
         for effect, pattern in expected.items():
             with self.subTest(effect=effect):
@@ -50,8 +50,9 @@ class StateTests(unittest.TestCase):
             for value in (float('nan'), float('inf'), -float('inf')):
                 with self.assertRaises(ValueError):
                     light.RingState().update(**{field: value})
-        with self.assertRaises(ValueError):
-            light.RingState().update(effect='not an effect')
+        for effect in ('not an effect', 'Meter'):
+            with self.assertRaises(ValueError):
+                light.RingState().update(effect=effect)
         self.assertEqual(light.RingState().update(effect='').effect, 'None')
         with self.assertRaises(ValueError):
             light.RingState(state=True).animation(ttl=0)

@@ -16,7 +16,9 @@ The light supports on/off, brightness, RGB colour and these effects:
 | Rotate | `rotate` | A three-LED arc in the selected colour |
 | Pulse / Breathe | `pulse` | Selected colour pulsing over 1.2 / 3 seconds |
 | Rainbow | `rotate` | Rotating rainbow; brightness applies, RGB is ignored |
-| Meter | `meter` | Selected colour following device speaker audio; dim at silence |
+
+Meter is omitted because the firmware measures voice-response audio before
+mixing in music. The normal voice-response meter remains unchanged.
 
 Every effect runs on the device's existing animation engine. Home Assistant
 sends a pattern, not a stream of frames. Brightness and colour brightness scale

@@ -14,7 +14,10 @@ import time
 
 LIGHT_KEY = 4  # Append-only alongside media=1, button=2, lux=3.
 LEASE_SECONDS = 60
-EFFECTS = ('None', 'Spin', 'Slow spin', 'Rotate', 'Pulse', 'Breathe', 'Rainbow', 'Meter')
+# Meter is intentionally absent: firmware measures the voice-response channel
+# before mixing in music (pcm_speaker.go), so it cannot reliably visualise
+# music as an idle HA effect. Voice turns retain their existing meter animation.
+EFFECTS = ('None', 'Spin', 'Slow spin', 'Rotate', 'Pulse', 'Breathe', 'Rainbow')
 log = logging.getLogger('echomuse.esphome.light')
 
 
@@ -65,8 +68,6 @@ class RingState:
             palette = [[round(c * scale) for c in colorsys.hsv_to_rgb(i / 12, 1, 1)]
                        for i in range(12)]
             spec.update(pattern='rotate', colors=palette, periodMs=120)
-        elif self.effect == 'Meter':
-            spec.update(pattern='meter')
         return spec
 
 

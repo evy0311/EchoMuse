@@ -91,7 +91,7 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
                        dict(has_rgb=True, red=float('inf')),
                        dict(has_color_mode=True, color_mode=pb.COLOR_MODE_WHITE),
                        dict(has_flash_length=True, flash_length=100),
-                       dict(has_effect=True, effect='Echo red')]:
+                       dict(has_effect=True, effect='Meter')]:
             await self.sat._light_command(command(**fields))
             self.assertEqual(self.srv.light.state, initial)
             self.assertTrue(self.responses[-1].state)
