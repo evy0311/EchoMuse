@@ -4185,7 +4185,6 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             ring_alarm=_ring_alarm,
             stop_alarm=_stop_alarm,
             start_conversation=_start_conversation,
-            send_led_ring=lambda pixels: em_led_light.send_to_device(device, pixels),
             send_led_ring_animation=lambda anim: em_led_light.send_animation_to_device(device, anim),
             led_ring_ready=lambda: not (
                 device.voice_lock.locked() or device.timer_alarm_ringing or device.muted),

@@ -41,16 +41,18 @@ async def main(host, port):
         state = await next_state()
         assert state.state and abs(state.brightness - 0.25) < 0.001
         print('PASS: state retained across HA client reconnect')
-        expected_effects = {'None', 'Echo red', 'Spin', 'Slow spin', 'Pulse', 'Breathe', 'Rainbow'}
+        expected_effects = {'None', 'Spin', 'Slow spin', 'Rotate', 'Pulse', 'Breathe', 'Rainbow', 'Meter'}
         assert set(lights[0].effects) == expected_effects
         for effect in sorted(expected_effects):
             client.light_command(4, state=True, effect=effect)
             state = await next_state()
             assert state.effect == effect
-            if effect == 'Echo red':
-                assert (state.red, state.green, state.blue) == (1, 0, 0)
-                assert abs(state.brightness - 180/255) < 0.001
-        print('PASS: all effects discovered and acknowledged; exact Echo red reference')
+        print('PASS: all native effects discovered and acknowledged')
+        client.light_command(4, state=True, effect='None')
+        assert (await next_state()).state
+        state = await asyncio.wait_for(updates.get(), 65)
+        assert not state.state
+        print('PASS: solid pattern expires and publishes OFF without more HA commands')
         client.light_command(4, state=False)
         state = await next_state()
         assert not state.state

@@ -9,8 +9,6 @@ services:
       - "8770:8770"
       - "16001-16010:16001-16010"
       - "17001-17010:17001-17010"
-    environment:
-      EM_HA_LED_RING: "device"
     volumes:
       - ./em_esphome.py:/app/em_esphome.py:ro
       - ./em_controller.py:/app/em_controller.py:ro
@@ -21,7 +19,6 @@ services:
     command: [python, -u, /app/light_test_server.py]
     environment:
       SERVER_IP: ${SERVER_IP}
-      EM_HA_LED_RING: "test"
     ports:
       - "16099:16099"
     volumes:

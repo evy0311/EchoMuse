@@ -219,8 +219,6 @@ log = logging.getLogger("echomuse.esphome")
 # ─── Config ───────────────────────────────────────────────────────────────────
 
 SERVER_IP    = em_hostip.server_ip(os.environ.get("SERVER_IP"))
-HA_LED_RING_MODE = os.environ.get("EM_HA_LED_RING", "off").lower()
-
 SERVER_HOST  = os.environ.get("SERVER_HOST", "0.0.0.0")
 MDNS_NAME    = os.environ.get("MDNS_NAME", "echomuse")
 
@@ -524,28 +522,38 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
     @property
     def _led_light_enabled(self) -> bool:
-        return self._owning_server is not None and (
-            HA_LED_RING_MODE == "test" or
-            (HA_LED_RING_MODE == "device" and self._device_has("leds")))
+        # Raw LED frames have no device-side expiry. Older firmware keeps its
+        # existing status LEDs without advertising an unsafe ambient light.
+        return self._device_has("leds") and self._device_has("led_anim")
 
     async def _light_command(self, msg):
-        ring = self._owning_server.light
+        server = self._owning_server
+        if server.get_satellite() is not self:
+            return
         try:
-            if (HA_LED_RING_MODE == "device" and not self._device_has("led_anim")
-                    and msg.has_effect and msg.effect in em_led_light.ANIMATED_EFFECTS):
-                raise ValueError("Device does not advertise LED animations")
-            await ring.command(msg, test=HA_LED_RING_MODE == "test")
-            pixel = ring.state.pixels()[0]
-            log.debug("[%s] LED ring: on=%s effect=%s brightness=%.3f rgb=(%s,%s,%s)",
-                      self._log_name, ring.state.state, ring.state.effect,
-                      ring.state.brightness, pixel['r'], pixel['g'], pixel['b'])
+            if msg.has_color_mode and msg.color_mode != api_pb2.COLOR_MODE_RGB:
+                raise ValueError("Only RGB mode is supported")
+            if msg.has_flash_length and msg.flash_length:
+                raise ValueError("Flash is not supported; use the Pulse effect")
+            changes = {}
+            if msg.has_state:
+                changes["state"] = msg.state
+            for field in ("brightness", "color_brightness", "effect"):
+                if getattr(msg, "has_" + field):
+                    changes[field] = getattr(msg, field)
+            if msg.has_rgb:
+                changes.update((field, getattr(msg, field))
+                               for field in ("red", "green", "blue"))
+            # As with ESPHome's immediate outputs, transition requests apply
+            # immediately. No controller-side animation frames are streamed.
+            await server.light.command(**changes)
         except (ValueError, RuntimeError, OSError) as exc:
             log.warning("[%s] LED ring command rejected: %s", self._log_name, exc)
         except Exception:
             log.exception("[%s] LED ring write failed", self._log_name)
-        # Report the last successful command, even on a rejected write.
-        if self._owning_server.get_satellite() is self:
-            self._send_one(ring.state.response())
+        # Includes rejected commands, so HA returns to the accepted setting.
+        if server.get_satellite() is self:
+            self._send_one(server.light_state_msg())
 
     def _voice_assistant_flags(self) -> int:
         """
@@ -654,8 +662,12 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     state_class=1,   # STATE_CLASS_MEASUREMENT
                 )
             if self._led_light_enabled:
-                yield em_led_light.entity(test=HA_LED_RING_MODE == "test",
-                                          animated=self._device_has("led_anim"))
+                yield api_pb2.ListEntitiesLightResponse(
+                    key=em_led_light.LIGHT_KEY, object_id="led_ring", name="LED Ring",
+                    supported_color_modes=[api_pb2.COLOR_MODE_RGB],
+                    legacy_supports_brightness=True, legacy_supports_rgb=True,
+                    icon="mdi:circle-outline", effects=em_led_light.EFFECTS,
+                )
             yield api_pb2.ListEntitiesDoneResponse()
             return
 
@@ -664,7 +676,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             log.debug(f"[{self._log_name}] {type(msg).__name__} from {self.peer}")
             yield self._media_state_msg()
             if self._led_light_enabled:
-                yield self._owning_server.light.state.response()
+                yield self._owning_server.light_state_msg()
             return
 
         if isinstance(msg, api_pb2.SubscribeVoiceAssistantRequest):
@@ -2392,7 +2404,7 @@ class DeviceESPhomeServer:
         # every volume_state message from the device. Read by the satellite
         # for MediaPlayerStateResponse rather than hardcoding 1.0.
         self.volume: float = 1.0
-        self.light = em_led_light.RingLight()
+        self.light = em_led_light.RingLight(on_change=self._publish_light_state)
         # Injected by device_connected() — async callable(pcm_bytes) for
         # standalone announce playback (setup wizard, push TTS) when no
         # voice turn is active.
@@ -2435,6 +2447,17 @@ class DeviceESPhomeServer:
     def get_satellite(self) -> Optional[EchoMuseSatellite]:
         """Return the active HA connection's satellite instance, or None."""
         return self._active_satellite
+
+    def light_state_msg(self):
+        return api_pb2.LightStateResponse(
+            key=em_led_light.LIGHT_KEY, color_mode=api_pb2.COLOR_MODE_RGB,
+            **vars(self.light.state),
+        )
+
+    def _publish_light_state(self, _state) -> None:
+        satellite = self.get_satellite()
+        if satellite is not None and satellite._led_light_enabled:
+            satellite._send_one(self.light_state_msg())
 
     def set_volume(self, volume: float) -> None:
         """Update stored volume (0.0–1.0) from a device volume_state report."""
@@ -2529,6 +2552,11 @@ class DeviceESPhomeServer:
         log.info(f"[esphome.{self.device_id[-8:]}] Listening on {host}:{self.port}")
 
     async def stop(self) -> None:
+        self.light.release()
+        self.light.sender = None
+        if self._active_satellite is not None:
+            for task in self._active_satellite._light_tasks:
+                task.cancel()
         # Detach state up front so a device reconnect during the await below
         # sees _server is None and starts a fresh listener, instead of
         # trusting a listener that close() has already shut down.
@@ -3171,7 +3199,6 @@ async def device_connected(
     ring_alarm=None,
     stop_alarm=None,
     start_conversation=None,
-    send_led_ring=None,
     send_led_ring_animation=None,
     led_ring_ready=None,
 ) -> None:
@@ -3196,7 +3223,8 @@ async def device_connected(
     ring (chime + LED pulse). Provided by the controller as closures over the
     Device object, since ringing drives device speaker/mic/LEDs.
 
-    send_led_ring: async callable(pixels) — writes one manual RGB ring frame.
+    send_led_ring_animation: async callable(anim) — writes an idle led_anim spec.
+    led_ring_ready: callable() — true only outside voice, timer and mute states.
 
     start_conversation: async callable() — runs one voice turn with no wake
     word, for HA's announce-then-listen (`assist_satellite.start_conversation`
@@ -3216,10 +3244,10 @@ async def device_connected(
         if row is None or not row["approved"]:
             return
         server = await _register_device_server(device_id, row["label"])
-    server.light.sender = send_led_ring
-    server.light.animation_sender = send_led_ring_animation
+    server.light.sender = send_led_ring_animation
     server.light.ready = led_ring_ready or (lambda: True)
     server.light.release()
+    server._publish_light_state(server.light.state)
     server._standalone_play = standalone_play
     server._send_volume_set = send_volume_set
     server._ring_alarm = ring_alarm
@@ -3244,7 +3272,6 @@ async def device_disconnected(device_id: str) -> None:
     if server is None:
         return
     server.light.sender = None
-    server.light.animation_sender = None
     server.light.release()
     if server._server is None:
         log.debug(f"[esphome.{device_id[-8:]}] device_disconnected: port already down")
@@ -3264,13 +3291,13 @@ async def device_disconnected(device_id: str) -> None:
 def suspend_manual_light(device_id: str) -> None:
     """Status LEDs temporarily own the ring; HA continues to show desired state."""
     server = _servers.get(device_id)
-    if server is not None and HA_LED_RING_MODE == "device":
+    if server is not None:
         server.light.suspend()
 
 
 def resume_manual_light(device_id: str, delay: float = 0) -> None:
     server = _servers.get(device_id)
-    if server is not None and HA_LED_RING_MODE == "device":
+    if server is not None:
         server.light.schedule_restore(delay)
 
 

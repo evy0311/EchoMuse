@@ -5,10 +5,8 @@ entity discovery/command handler as the real EchoMuse satellite.
 """
 import asyncio
 import logging
-import os
 from types import SimpleNamespace
 
-os.environ['EM_HA_LED_RING'] = 'test'
 from em_esphome import DeviceESPhomeServer, EchoMuseSatellite
 from esphome.vendor import api_pb2 as pb
 
@@ -45,6 +43,11 @@ async def main():
     server = TestServer('echomuse-led-lab-0001', 'EchoMuse LED Lab',
                         '02:EC:40:00:00:01', 'test', 16099,
                         SimpleNamespace(name='Test', languages=['en']))
+    async def record_animation(animation):
+        logging.info('SIMULATED led_anim: %s', animation)
+
+    server.set_capabilities(['leds', 'led_anim'])
+    server.light.sender = record_animation
     await server.start('0.0.0.0')
     logging.info('Simulated LED light listening on port 16099; no physical LEDs used')
     try:
