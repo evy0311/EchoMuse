@@ -4,7 +4,7 @@
 # its dependencies never reach the controller image; only the model is copied.
 # Input and output are both pinned by sha256: the output is what devices run,
 # and it is the file measured on VVV. MIT licensed.
-FROM python:3.12-slim AS silero
+FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9 AS silero
 COPY tools/silero_typed.py /tmp/
 RUN pip install --no-cache-dir --root-user-action=ignore onnx==1.20.1 && \
     python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/silero_vad.onnx', '/tmp/in.onnx')" && \
@@ -12,7 +12,9 @@ RUN pip install --no-cache-dir --root-user-action=ignore onnx==1.20.1 && \
     python /tmp/silero_typed.py /tmp/in.onnx /silero_vad.onnx && \
     echo "da5e8a9c9c07981b907e8affe5497fe604958c51b67bff07231778d701d164d0  /silero_vad.onnx" | sha256sum -c -
 
-FROM python:3.12-slim
+# Base pinned by the multi-arch index digest, so every build of a given commit
+# starts from the same bytes; Dependabot moves the digest weekly with the tag.
+FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9
 # Links the GHCR package page back to the repo (and lets the package inherit
 # the repo's public visibility once connected).
 LABEL org.opencontainers.image.source="https://github.com/wilbowes/EchoMuse" \
@@ -94,10 +96,12 @@ COPY em_auth.py .
 COPY em_eq.py .
 COPY em_limiter.py .
 COPY em_mbc.py .
+COPY em_output_mute.py .
 COPY em_scenes.py .
 COPY em_support.py .
 COPY em_shadow.py .
 COPY em_barge.py .
+COPY em_earlytts.py .
 COPY em_ns.py .
 COPY em_speechgate.py .
 COPY em_wav.py .
@@ -105,19 +109,27 @@ COPY em_pki.py .
 COPY em_hostip.py .
 COPY em_ingressauth.py .
 COPY em_linkauth.py .
+COPY em_tcp.py .
 COPY em_pacing.py .
 COPY em_platform.py .
 COPY em_wsclose.py .
 COPY em_rttlog.py .
 COPY em_esphome.py .
 COPY em_ble_health.py .
+COPY em_config_types.py .
+COPY em_dbwriter.py .
+COPY em_tasks.py .
 COPY em_ble_proxy.py .
+COPY em_broadcast.py .
 COPY em_oww_assets.py  ./
 COPY em_oww_models.py .
+COPY em_pairing.py .
 COPY em_oww_metadata.py .
 COPY em_oww_warmup.py .
 COPY em_arbiter.py .
 COPY em_listen.py .
+COPY em_wakelevel.py .
+COPY em_endpoints.py .
 COPY em_button.py .
 COPY em_tap_burst.py .
 COPY em_player.py .

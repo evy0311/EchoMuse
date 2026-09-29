@@ -56,10 +56,16 @@ from typing import Any
 
 # Device columns safe to publish. Names are listed rather than filtered so a
 # future column is excluded by default.
+#
+# base_os (v21) and kernel_arch/kernel_release (v23) were stored for weeks
+# before anyone listed them here, so #566's bundle could not say whether the
+# device ran FireOS 6's kernel -- the one fact that tied it to #587's fault.
+# They describe the build, not the owner.
 _DEVICE_FIELDS = (
     "device_id", "approved", "firmware_ver", "firmware_previous",
     "first_seen", "last_seen", "config_sections", "use_global_config",
     "esphome_port", "ble_proxy_port", "ble_proxy_enabled",
+    "base_os", "kernel_arch", "kernel_release",
 )
 
 # Config keys are behaviour, not secrets — but the WiFi credential is neither
@@ -99,6 +105,8 @@ _METRIC_FIELDS = (
     "cpu_temp_avg", "cpu_temp_max", "max_temp_max",
     "cores_online_last", "cores_online_min", "cores_total",
     "thermal_limit_min",
+    "tcp_down_segs", "tcp_down_retrans", "tcp_down_retrans_pct",
+    "tcp_up_retrans", "tcp_up_retrans_pct", "tcp_rto_max_ms",
 )
 
 # The controller's own resource use. Nothing here is private in itself, but it

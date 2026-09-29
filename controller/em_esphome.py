@@ -85,15 +85,18 @@ import em_ns
 import em_announce
 import em_recordings
 import em_runbarrier
+import em_earlytts
 import em_speechgate
 import em_wav
 import em_oww_models
 import em_oww_metadata
 import em_player
+import em_tasks
 import em_timers
 import em_turnclock
 import em_volume
 import em_led_light
+import em_output_mute
 
 # ── VAD sentinels ──────────────────────────────────────────────────────────────
 # Queue items marking end-of-speech in mic_queue/voice_queue, in place of
@@ -406,6 +409,15 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._tts_audio_url:    Optional[str] = None
         self._tts_audio_data:   Optional[bytes] = None
         self._tts_event         = asyncio.Event()
+        # Early start (em_earlytts): the URL HA announced in RUN_START, whether
+        # this turn is playing from INTENT_PROGRESS rather than TTS_END, and the
+        # flag an HA ERROR sets to end an early fetch HA will never close.
+        self._early_tts_url:    Optional[str] = None
+        self._tts_streamed_early = False
+        self._tts_abort         = asyncio.Event()
+        # The device's streamReply setting, read once per turn (off by
+        # default: see em_earlytts for why this is the user's choice).
+        self._stream_reply      = False
         self._conversation_id:  str = ""
         self._trace:            "TurnTrace | None" = None
         # Set on VOICE_ASSISTANT_INTENT_END — the reliable "STT + intent
@@ -506,7 +518,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             return
         self._thinking_entered = True
         if self._on_thinking:
-            asyncio.create_task(self._on_thinking())
+            em_tasks.spawn(self._on_thinking())
 
     def _device_has(self, cap: str) -> bool:
         srv = self._owning_server
@@ -568,11 +580,35 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         return flags
 
     @property
+    def _current_muted(self) -> bool:
+        """Output mute as HA should see it (em_output_mute)."""
+        if self._owning_server is not None:
+            return self._owning_server.output_mute.muted
+        return False
+
+    @property
     def _current_volume(self) -> float:
         """Current volume as HA float (0.0–1.0), read from owning server."""
         if self._owning_server is not None:
             return self._owning_server.volume
         return 1.0
+
+    def _apply_output_mute(self, mute: bool) -> None:
+        """HA's mute/unmute: send the level em_output_mute decides."""
+        server = self._owning_server
+        if server is None:
+            return
+        om = server.output_mute
+        level = (om.mute(em_volume.ha_volume_to_device(server.volume))
+                 if mute else om.unmute())
+        log.info(f"[{self._log_name}] output {'mute' if mute else 'unmute'}"
+                 f"{'' if level is None else f' → level {level}'}")
+        if level is None:
+            return
+        if server._send_volume_set is not None:
+            em_tasks.spawn(server._send_volume_set(level))
+        else:
+            log.warning(f"[{self._log_name}] mute requested but device not connected")
 
     def handle_message(self, msg):
         """
@@ -757,13 +793,14 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 # ceiling is the codec's unity gain, above which the DAC
                 # clips (see em_volume's docstring).
                 level = em_volume.ha_volume_to_device(msg.volume)
+                self._owning_server.output_mute.volume_set(level)
                 log.debug(
                     f"[{self._log_name}] MediaPlayerCommandRequest: "
                     f"volume={msg.volume:.3f} → level={level}"
                 )
                 send_fn = self._owning_server._send_volume_set
                 if send_fn is not None:
-                    asyncio.create_task(send_fn(level))
+                    em_tasks.spawn(send_fn(level))
                 else:
                     log.warning(f"[{self._log_name}] volume set requested but device not connected")
             if msg.has_media_url and device_id is not None:
@@ -772,18 +809,29 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     # VoiceAssistantAnnounceRequest (interrupts music via
                     # the standalone-play wrapper, resumes after).
                     log.info(f"[{self._log_name}] play_media announce: {msg.media_url!r}")
-                    asyncio.create_task(self._play_media_announce(msg.media_url))
+                    em_tasks.spawn(self._play_media_announce(msg.media_url))
                 else:
                     log.info(f"[{self._log_name}] play_media: {msg.media_url!r}")
-                    asyncio.create_task(em_player.play(device_id, msg.media_url))
+                    em_tasks.spawn(em_player.play(device_id, msg.media_url))
             elif msg.has_command and device_id is not None:
                 cmd = msg.command
-                if cmd == api_pb2.MEDIA_PLAYER_COMMAND_PAUSE:
-                    asyncio.create_task(em_player.pause(device_id))
+                # Logged because the sender is otherwise invisible: a pause
+                # from Music Assistant, an automation or a UI looks the same
+                # on our side, and play_media is the only command we logged.
+                _name = {api_pb2.MEDIA_PLAYER_COMMAND_PAUSE: "pause",
+                         api_pb2.MEDIA_PLAYER_COMMAND_PLAY: "play",
+                         api_pb2.MEDIA_PLAYER_COMMAND_STOP: "stop"}.get(cmd)
+                if _name:
+                    log.info(f"[{self._log_name}] media command: {_name}")
+                if cmd in (api_pb2.MEDIA_PLAYER_COMMAND_MUTE,
+                           api_pb2.MEDIA_PLAYER_COMMAND_UNMUTE):
+                    self._apply_output_mute(cmd == api_pb2.MEDIA_PLAYER_COMMAND_MUTE)
+                elif cmd == api_pb2.MEDIA_PLAYER_COMMAND_PAUSE:
+                    em_tasks.spawn(em_player.pause(device_id))
                 elif cmd == api_pb2.MEDIA_PLAYER_COMMAND_PLAY:
-                    asyncio.create_task(em_player.resume(device_id))
+                    em_tasks.spawn(em_player.resume(device_id))
                 elif cmd == api_pb2.MEDIA_PLAYER_COMMAND_STOP:
-                    asyncio.create_task(em_player.stop(device_id))
+                    em_tasks.spawn(em_player.stop(device_id))
                 else:
                     log.debug(
                         f"[{self._log_name}] MediaPlayerCommandRequest: "
@@ -796,7 +844,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     key=MEDIA_PLAYER_KEY,
                     state=MediaPlayerState.PLAYING,
                     volume=self._current_volume,
-                    muted=False,
+                    muted=self._current_muted,
                 )
             else:
                 yield self._media_state_msg()
@@ -906,7 +954,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 f"[{self._log_name}] AnnounceRequest: media_id={msg.media_id!r} "
                 f"text={msg.text!r} start_conversation={msg.start_conversation}"
             )
-            asyncio.create_task(self._run_announce(
+            em_tasks.spawn(self._run_announce(
                 msg.media_id,
                 preannounce_media_id=msg.preannounce_media_id,
                 start_conversation=msg.start_conversation,
@@ -915,7 +963,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 key=MEDIA_PLAYER_KEY,
                 state=MediaPlayerState.PLAYING,
                 volume=self._current_volume,
-                muted=False,
+                muted=self._current_muted,
             )
             return
 
@@ -1027,7 +1075,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 task.add_done_callback(self._timer_tasks.discard)
                 task.add_done_callback(self._log_timer_task_error)
             if self._on_stt_end and not self._turn_cancelled:
-                asyncio.create_task(self._on_stt_end(text))
+                em_tasks.spawn(self._on_stt_end(text))
 
         elif event_type == ET.VOICE_ASSISTANT_INTENT_END:
             # Reliable "STT + intent resolution genuinely finished" marker —
@@ -1047,9 +1095,12 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             url = data.get("url", "")
             if url:
                 log.info(f"[{self._log_name}] TTS URL: {url}")
-            if self._trace:
+            if self._trace and self._trace.t_tts_url_ms < 0:
                 self._trace.t_tts_url_ms = self._trace.elapsed_ms()
-            self._tts_audio_url = url
+            if not self._tts_streamed_early:
+                # An early start is already playing its URL, and it is the same
+                # one (ESPHome's firmware does not restart on TTS_END either).
+                self._tts_audio_url = url
             self._tts_event.set()
 
         elif event_type == ET.VOICE_ASSISTANT_RUN_START:
@@ -1061,6 +1112,28 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # `_internal_on_pipeline_event(PipelineEvent(RUN_END))`, so no
             # RUN_START is ever sent. Structural, not a race on timing.
             self._run_started = True
+            self._early_tts_url = em_earlytts.run_start_url(data)
+
+        elif event_type == ET.VOICE_ASSISTANT_INTENT_PROGRESS:
+            # The reply's first text has arrived and HA is feeding it to the TTS
+            # engine. Play the URL from RUN_START now instead of waiting for
+            # TTS_END, which comes after the whole reply (see em_earlytts).
+            if em_earlytts.should_start(
+                enabled=self._stream_reply,
+                progress=data,
+                announced_url=self._early_tts_url,
+                playing_url=self._tts_audio_url,
+                cancelled=self._turn_cancelled,
+            ):
+                log.info(
+                    f"[{self._log_name}] TTS streaming early "
+                    f"(tts_start_streaming): {self._early_tts_url}"
+                )
+                self._tts_audio_url = self._early_tts_url
+                self._tts_streamed_early = True
+                if self._trace and self._trace.t_tts_url_ms < 0:
+                    self._trace.t_tts_url_ms = self._trace.elapsed_ms()
+                self._tts_event.set()
 
         elif event_type == ET.VOICE_ASSISTANT_RUN_END:
             log.info(f"[{self._log_name}] Pipeline run ended")
@@ -1127,6 +1200,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # stream stays parked until the device's own gate closes.
             self._ha_vad_end.set()
             self._tts_event.set()  # unblock turn waiter
+            # An early TTS fetch is still open and HA will not close it.
+            self._tts_abort.set()
 
     # ── Announcement handling ────────────────────────────────────────────
 
@@ -1150,7 +1225,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             key=MEDIA_PLAYER_KEY,
             state=st,
             volume=self._current_volume,
-            muted=False,
+            muted=self._current_muted,
         )
 
     def _announce_play_cb(self):
@@ -1307,6 +1382,10 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._tts_event.clear()
         self._tts_audio_url         = None
         self._tts_audio_data        = None
+        self._early_tts_url         = None
+        self._tts_streamed_early    = False
+        self._tts_abort.clear()
+        self._stream_reply          = bool(getattr(device, "stream_reply", False))
         self._intent_ended          = False
         self._stt_ended             = False
         # Derived from the trace's own trigger label rather than plumbed
@@ -1481,12 +1560,18 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 try:
                     if trace:
                         trace.t_playback_ms = trace.elapsed_ms()
+                    chunks = _stream_tts_audio(self._tts_audio_url)
+                    if self._tts_streamed_early:
+                        # Same reasoning as _stream_tts_audio wrapping
+                        # _stream_tts_audio_once below: closed explicitly so an
+                        # aborted early stream's pending fetch is cancelled now,
+                        # not whenever the generator is collected.
+                        chunks = em_earlytts.abortable_stream(chunks, self._tts_abort)
                     # Closed explicitly: the player BREAKS out of its loop on
                     # a barge-in, and teardown (ffmpeg's kill) must run then,
                     # not whenever the generator is collected.
-                    async with contextlib.aclosing(_stamp_first_audio(
-                            _stream_tts_audio(self._tts_audio_url))) as chunks:
-                        pcm_bytes = await post_turn_play(chunks)
+                    async with contextlib.aclosing(_stamp_first_audio(chunks)) as stamped:
+                        pcm_bytes = await post_turn_play(stamped)
                 except Exception as e:
                     log.error(f"[{self._log_name}] TTS audio stream failed: {e}")
                     if trace: trace.outcome = "tts_error"
@@ -1494,6 +1579,13 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
                 if trace:
                     trace.tts_bytes = pcm_bytes or 0
+
+                if self._tts_streamed_early:
+                    # An early stream can end a moment before INTENT_END, which
+                    # carries continue_conversation. Give the event a beat.
+                    await em_earlytts.wait_until(
+                        lambda: self._intent_ended or self._turn_cancelled, 2.0
+                    )
 
                 if self._turn_cancelled or self._turn_end_reason:
                     # #251: cut off mid-response. This used to fall through to
@@ -1909,7 +2001,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     if gate.open and not speech_seen:
                         speech_seen = True
                         log.info(f"[{self._log_name}] Speech gate {gate.summary()}, p={prob:.2f}")
-                        asyncio.ensure_future(device.beam_lock())
+                        em_tasks.spawn(device.beam_lock())
                 for payload in frames:
                     # Every frame, not just until the first hit: the controller's
                     # own endpoint needs to know when speech LAST was, not only
@@ -1931,7 +2023,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                         # turn already locked at detection — the device no-ops a
                         # second lock) and after any TTS mic restart, which resets
                         # the beam to ch6 omni.
-                        asyncio.ensure_future(device.beam_lock())
+                        em_tasks.spawn(device.beam_lock())
 
                     if denoiser is not None:
                         raw_payload = payload
@@ -2405,6 +2497,9 @@ class DeviceESPhomeServer:
         # for MediaPlayerStateResponse rather than hardcoding 1.0.
         self.volume: float = 1.0
         self.light = em_led_light.RingLight(on_change=self._publish_light_state)
+        # HA's output mute; lives on the server so it survives the device
+        # reconnecting, which is exactly when it has to be re-applied.
+        self.output_mute = em_output_mute.OutputMute()
         # Injected by device_connected() — async callable(pcm_bytes) for
         # standalone announce playback (setup wizard, push TTS) when no
         # voice turn is active.
@@ -3427,6 +3522,21 @@ def update_ambient_lux(device_id: str, lux) -> None:
         state=float(lux) if lux is not None else 0.0,
         missing_state=lux is None,
     ))
+
+
+def output_mute_report(device_id: str, level: int) -> tuple[bool, int | None]:
+    """(keep, send) for a device volume report (see
+    em_output_mute.device_report). (True, None) when no server exists."""
+    server = _servers.get(device_id)
+    if server is None:
+        return True, None
+    return server.output_mute.device_report(level)
+
+
+def output_mute_on_reconnect(device_id: str) -> int | None:
+    """Level to re-send after a reconnect while output-muted, else None."""
+    server = _servers.get(device_id)
+    return server.output_mute.on_reconnect() if server is not None else None
 
 
 def update_device_volume(device_id: str, volume: float) -> None:

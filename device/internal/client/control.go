@@ -2,9 +2,11 @@ package client
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -14,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -111,7 +114,9 @@ type ControlClient struct {
 	disconnectedCallback  StateCallback
 	connectedCallback     StateCallback
 	pendingCallback       StateCallback
+	refusedCallback       StateCallback
 	configAppliedCallback ConfigAppliedCallback
+	playCueCallback       func(string)
 	volumeSetCallback     VolumeSetCallback
 	beamLockCallback      BeamLockCallback
 	speakerFlushCallback  StateCallback
@@ -144,7 +149,18 @@ type ControlClient struct {
 	// shellCancel cancels a running shell session when shell_close is received.
 	shellCancel context.CancelFunc
 	shellMu     sync.Mutex
+	// shellsLive counts running shell sessions — the dashboard console and
+	// the controller's programmatic ones (OTA, asset pushes) alike.
+	shellsLive atomic.Int32
+
+	// pair is the pairing window opened by a held action button (pairing.go).
+	pair *pairState
 }
+
+// ShellActive reports whether any shell session is running. Typing in the
+// console is a round trip per keystroke and a transfer is bulk, and both
+// stutter while the BLE scan runs, so the scanner yields for them.
+func (c *ControlClient) ShellActive() bool { return c.shellsLive.Load() > 0 }
 
 func NewControlClient(
 	deviceID string,
@@ -157,6 +173,7 @@ func NewControlClient(
 		ledCallback:      ledCallback,
 		micStartCallback: micStartCallback,
 		micStopCallback:  micStopCallback,
+		pair:             newPairState(),
 	}
 }
 
@@ -165,7 +182,9 @@ func (c *ControlClient) OnListen(cb ListenCallback)               { c.listenCall
 func (c *ControlClient) OnDisconnected(cb StateCallback)          { c.disconnectedCallback = cb }
 func (c *ControlClient) OnConnected(cb StateCallback)             { c.connectedCallback = cb }
 func (c *ControlClient) OnPending(cb StateCallback)               { c.pendingCallback = cb }
+func (c *ControlClient) OnRefused(cb StateCallback)               { c.refusedCallback = cb }
 func (c *ControlClient) OnConfigApplied(cb ConfigAppliedCallback) { c.configAppliedCallback = cb }
+func (c *ControlClient) OnPlayCue(cb func(string))                { c.playCueCallback = cb }
 func (c *ControlClient) OnVolumeSet(cb VolumeSetCallback)         { c.volumeSetCallback = cb }
 func (c *ControlClient) OnBeamLock(cb BeamLockCallback)           { c.beamLockCallback = cb }
 func (c *ControlClient) OnSpeakerFlush(cb StateCallback)          { c.speakerFlushCallback = cb }
@@ -184,6 +203,20 @@ func (c *ControlClient) IsConnected() bool {
 }
 
 var errPending = fmt.Errorf("pending approval")
+
+// errRefused: a controller answered and would not accept this device's
+// credentials — its certificate is not signed by our CA, or it sent
+// `refused`. Distinct from "no controller" because the owner can fix it, by
+// holding the action button to pair (pairing.go), and the ring says so.
+var errRefused = fmt.Errorf("controller refused this device's credentials")
+
+// refusedByTLS reports whether a dial failed on certificate verification,
+// i.e. something answered on the TLS port with a certificate our CA did not
+// sign. Every other dial failure is "no controller".
+func refusedByTLS(err error) bool {
+	var v *tls.CertificateVerificationError
+	return errors.As(err, &v)
+}
 
 // maxStaticAttempts is how many consecutive dial failures one configured
 // endpoint gets before Run moves to the next target in the pass. 1 would
@@ -242,6 +275,13 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 	targetIdx := 0
 	targetAttempts := 0
 	passNum := 0
+	// held: the last dial reached a controller that holds this device
+	// pending approval, or refuses its credentials. The ring stays on that
+	// state's own pulse across the redial; the orange "disconnected" pulse at
+	// the top of each attempt used to cut in for a moment every retry, read
+	// as a red/orange flicker. A dial that actually fails shows orange from
+	// the failure branch below.
+	held := false
 
 	for {
 		if ctx.Err() != nil {
@@ -294,7 +334,7 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 				targetIdx, targetAttempts = 0, 0
 			}
 
-			if targetIdx == 0 && targetAttempts == 0 && c.disconnectedCallback != nil {
+			if targetIdx == 0 && targetAttempts == 0 && !held && c.disconnectedCallback != nil {
 				// Once per full pass, not once per target: otherwise the
 				// ring goes orange during every routine controller restart,
 				// which is one endpoint failing, not an outage.
@@ -321,7 +361,7 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 				}
 			}
 		} else {
-			if c.disconnectedCallback != nil {
+			if !held && c.disconnectedCallback != nil {
 				c.disconnectedCallback()
 			}
 
@@ -335,8 +375,8 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 			server = c.lastKnownServer()
 			if server != nil && server.TLSPort == 0 && loadLinkCreds().tlsConf != nil {
 				// CA installed but the cached endpoint predates the
-				// controller's TLS listener (e.g. controller upgraded, or a
-				// Secure-link push just landed, mid-run). One fresh browse so
+				// controller's TLS listener (e.g. controller upgraded, or an
+				// approval just installed credentials, mid-run). One fresh browse so
 				// the tls_port TXT is picked up; keep the cached endpoint if
 				// mDNS fails — after a WiFi change the controller can sit on
 				// another subnet where multicast doesn't reach.
@@ -376,9 +416,18 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 			err = dialErr
 		}
 
+		wasHeld := held
+		refused := errors.Is(err, errRefused)
+		held = err == errPending || refused
 		switch err {
 		case errPending:
-			log.Printf("[control] Device pending approval — retrying in 30s")
+			// A pairing request is repeated by redialling, and the controller
+			// forgets one 30s after its last repeat.
+			wait := 30 * time.Second
+			if c.Pairing() {
+				wait = pairRepeat
+			}
+			log.Printf("[control] Device pending approval — retrying in %s", wait)
 			if usingStatic {
 				// The endpoint answered, and registration itself worked —
 				// pending-approval is success for discovery purposes.
@@ -392,7 +441,8 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(30 * time.Second):
+			case <-c.pair.kick:
+			case <-time.After(wait):
 			}
 		default:
 			if usingStatic {
@@ -427,19 +477,29 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 			if usingStatic {
 				wait = staticRetryDelay(passNum)
 			}
+			// A pairing device asks by redialling, and the controller forgets
+			// a request 30s after its last repeat; the static backoff reaches
+			// 60s.
+			if c.Pairing() {
+				wait = pairRepeat
+			}
 			if err != nil {
 				log.Printf("[control] Connection lost: %v — reconnecting in %s", err, wait)
 			}
-			if !usingStatic && c.disconnectedCallback != nil {
+			if refused && c.refusedCallback != nil {
+				c.refusedCallback()
+			} else if (!usingStatic || wasHeld) && c.disconnectedCallback != nil {
 				// The static path already showed this once at the top of
 				// the pass; re-showing it here on every single target would
 				// reintroduce the per-endpoint flashing the pass-level check
-				// above exists to avoid.
+				// above exists to avoid. Except straight after a held
+				// state, which skipped the pass-level one.
 				c.disconnectedCallback()
 			}
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
+			case <-c.pair.kick:
 			case <-time.After(wait):
 			}
 		}
@@ -463,27 +523,41 @@ const staticHealthyDuration = 30 * time.Second
 func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInfo, data *DataClient) (bool, error) {
 	var connectedAt time.Time
 
-	// Credentials are re-read on every dial: a "Secure link" push from the
-	// controller lands mid-run, and the very next reconnect should pick it
-	// up without a restart.
+	// Credentials are re-read on every dial: an approval installs them
+	// mid-run, and the very next reconnect should pick them up without a
+	// restart.
 	creds := loadLinkCreds()
-	baseURL := "ws://" + server.Addr
-	if creds.tlsConf != nil {
-		if server.TLSPort > 0 {
-			baseURL = "wss://" + net.JoinHostPort(server.Host, strconv.Itoa(server.TLSPort))
-		} else {
-			// CA on disk but controller has no TLS listener (or a pre-TLS
-			// controller). Deliberate fallback during rollout — flipping
-			// REQUIRE_DEVICE_TLS controller-side is what eventually closes
-			// this downgrade path.
-			log.Printf("[control] CA installed but controller advertises no tls_port — dialling plain ws")
-		}
+	pairing := c.Pairing()
+	plan := dialPlan(creds.tlsConf != nil, server.TLSPort, pairing)
+	if len(plan) == 0 {
+		// A CA and no TLS listener: plain would be a downgrade (pairing.go).
+		return false, fmt.Errorf("CA installed but %s advertises no tls_port — not dialling plain; hold the action button 5s to pair", server.Addr)
 	}
 
-	log.Printf("[control] Connecting to %s", baseURL)
-	dialer := creds.dialer()
-	conn, _, err := dialer.DialContext(ctx, baseURL+"/control", creds.header())
+	var conn *websocket.Conn
+	var baseURL string
+	var attempt dialAttempt
+	var err error
+	for i, a := range plan {
+		baseURL = "ws://" + server.Addr
+		if a.tls {
+			baseURL = "wss://" + net.JoinHostPort(server.Host, strconv.Itoa(server.TLSPort))
+		}
+		log.Printf("[control] Connecting to %s", baseURL)
+		dialer := creds.dialer()
+		conn, _, err = dialer.DialContext(ctx, baseURL+"/control", creds.headerFor(baseURL))
+		if err == nil {
+			attempt = a
+			break
+		}
+		if i < len(plan)-1 {
+			log.Printf("[control] %s failed: %v — pairing, trying plain", baseURL, err)
+		}
+	}
 	if err != nil {
+		if refusedByTLS(err) {
+			return false, fmt.Errorf("%w: %v", errRefused, err)
+		}
 		return false, err
 	}
 	defer conn.Close()
@@ -540,6 +614,11 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 	// on biscuit the only thing that separates emOS on FireOS 5's 64-bit
 	// kernel from emOS on FireOS 6's 32-bit one. Unread by older controllers,
 	// so safe to add unnegotiated; omitted if uname fails.
+	// Asking to pair (pairing.go). On a plain dial the controller refuses
+	// the connection but records the request; after an approval it admits it.
+	if attempt.pairing {
+		reg["pairing"] = true
+	}
 	if m, r := platform.Kernel(); m != "" {
 		reg["kernel_arch"] = m
 		reg["kernel_release"] = r
@@ -569,6 +648,8 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 	switch first.Type {
 	case "pending":
 		return false, errPending
+	case "refused":
+		return false, errRefused
 	case "ack":
 		// The controller tells us what IT can do here. Recorded before conn
 		// is published, so a caller reading it can never see a stale set
@@ -732,6 +813,7 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 			if err := json.Unmarshal(raw, &msg); err == nil {
 				cfg := config.Get()
 				cfg.Apply(msg)
+				config.RecordReceived(raw)
 				// Persisted here rather than through OnConfigApplied,
 				// because emOS's init reads the file and the firmware only
 				// ever writes it — there is no in-process consumer for a
@@ -768,6 +850,10 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 					snap.VadThreshold, snap.OwwThreshold)
 				if c.configAppliedCallback != nil {
 					c.configAppliedCallback(msg)
+				}
+				// After the callback, so anything it applies is in the report.
+				if err := cfg.WriteReport(); err != nil {
+					log.Printf("[control] config report: %v", err)
 				}
 			}
 
@@ -852,6 +938,17 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 				c.listenCallback(peek.Type, msg.Session)
 			}
 
+		case "play_cue":
+			// A cue requested by the controller (#120): the wake sound for a
+			// wake outside a private-listening session, sent once it has won
+			// arbitration.
+			var cueMsg struct {
+				Cue string `json:"cue"`
+			}
+			if err := json.Unmarshal(raw, &cueMsg); err == nil && c.playCueCallback != nil {
+				c.playCueCallback(cueMsg.Cue)
+			}
+
 		case "speaker_flush":
 			// Barge-in: controller detected the wake word during TTS
 			// playback and wants the buffered audio cut immediately.
@@ -931,6 +1028,8 @@ const (
 // pipe used by programmatic sessions. If PTY allocation fails, the
 // session falls back to the pipe so a shell is always available.
 func (c *ControlClient) runShellSession(ctx context.Context, baseURL string, pty bool) {
+	c.shellsLive.Add(1)
+	defer c.shellsLive.Add(-1)
 	var master, slave *os.File
 	if pty {
 		var err error
@@ -949,7 +1048,7 @@ func (c *ControlClient) runShellSession(ctx context.Context, baseURL string, pty
 
 	creds := loadLinkCreds()
 	dialer := creds.dialer()
-	conn, _, err := dialer.DialContext(ctx, shellURL, creds.header())
+	conn, _, err := dialer.DialContext(ctx, shellURL, creds.headerFor(baseURL))
 	if err != nil {
 		log.Printf("[shell] Failed to connect to controller: %v", err)
 		if master != nil {
@@ -1120,9 +1219,17 @@ func capabilities() []string {
 	// the controller's ack carries the same feature, which is the controller
 	// saying it has stopped: either half alone keeps the old path, and both
 	// together must never process the same audio twice.
+	//
+	// "wake_cue": this firmware can play its own wake confirmation (#120).
+	// Without it the dashboard shows the toggle disabled, since a switch that
+	// saves and makes no sound fails the person it exists for.
+	//
+	// "pairing": this firmware asks to pair itself when its owner holds the
+	// action button 5 s (pairing.go). Without it the controller offers the
+	// admin a Pair action instead, since the device cannot ask.
 	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons",
 		"oww_shadow", "oww_trigger", "button_hold", "audio_mix",
-		"aec_hw_ref", "oww_local_only", "output_chain"}
+		"aec_hw_ref", "oww_local_only", "output_chain", "wake_cue", "pairing"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}
@@ -1291,8 +1398,11 @@ func (c *ControlClient) SendOwwShadowCross(score float32, ageMs int64) {
 // measured when the message is built, so time the message then spends in
 // flight is invisible to it; capturedMono is not, once the controller has
 // mapped the clock from ping replies.
+//
+// level is how loud the wake word was here (wakelevel.go), nil if its frames
+// had already left the ring; the controller logs it with the capture time.
 func (c *ControlClient) SendOwwWake(score, threshold float32, capturedAt time.Time,
-	session uint32, floor float64, barge bool) {
+	session uint32, floor float64, barge bool, level *WakeLevel) {
 	msg := map[string]interface{}{
 		"type":         "oww_wake",
 		"score":        score,
@@ -1304,6 +1414,10 @@ func (c *ControlClient) SendOwwWake(score, threshold float32, capturedAt time.Ti
 		msg["session"] = session
 		msg["floor"] = floor
 		msg["barge"] = barge
+	}
+	if level != nil {
+		msg["level"] = level.Level
+		msg["peak"] = level.Peak
 	}
 	_ = c.writeJSON(msg)
 }

@@ -63,6 +63,9 @@ version numbers to the existing issue instead.
 | Music started elsewhere stays silent until a voice turn finishes | [#262](https://github.com/wilbowes/EchoMuse/issues/262) |
 | Double/triple tap detected unreliably | [#115](https://github.com/wilbowes/EchoMuse/issues/115) |
 | High CPU on the device | [#176](https://github.com/wilbowes/EchoMuse/issues/176) |
+| Music Assistant shows the next track 10–15 s before it plays | [#674](https://github.com/wilbowes/EchoMuse/issues/674) |
+| Music drops out when a voice turn ducks it (2.25.0-ea.1) | [#671](https://github.com/wilbowes/EchoMuse/pull/671) |
+| One stereo channel silent, with clicking, on line out | [#669](https://github.com/wilbowes/EchoMuse/issues/669) |
 
 ---
 
@@ -231,6 +234,20 @@ noticeably worse.
 **Expect:** Audio moves to the jack.
 **Flag:** Anything beyond the known jack faults in the table above.
 
+### D7 · Speak while the reply is written
+**Do:** Config → Playback → turn on "Speak while the reply is written" and save.
+Ask for something long ("explain in two paragraphs how a refrigerator works").
+Turn it off, save, and ask again.
+**Expect:** With it on, speech starts at the first sentence and the controller
+log shows `TTS streaming early`. With it off, speech starts once the whole reply
+is ready. The words are the same either way, and neither change needs a restart.
+On a model or a TTS engine slower than speech, pauses between sentences with it
+on are expected, which is why it is off by default.
+**Flag:** Speech that never starts or stops part-way with it on; no difference in
+when speech starts between the two settings on a setup where Home Assistant's
+agent and TTS engine both stream; a change that needs a restart. Give the model,
+the TTS engine and the length of the reply.
+
 ---
 
 ## E — Music and ducking
@@ -343,11 +360,14 @@ the end. See [led-ring-states.md](led-ring-states.md).
 
 ## I — Security and the device link
 
-### I1 · Secure link
-**Do:** Device → Status. If Link reads `plain ws`, press **Secure link**.
+### I1 · Pairing
+**Do:** Device → Status. If Link reads `plain ws`, hold the Echo's action
+button for 5 seconds, then press **Approve pairing** (on older firmware,
+press **Pair**).
 **Expect:** The device reconnects within a few seconds and Link reads
 `wss (TLS)`.
 **Flag:** A device that goes offline and stays there. (It should redial.)
+Approve pairing appearing without anyone holding the button.
 
 ### I2 · Credentials survive a reboot
 **Do:** Reboot a TLS device.

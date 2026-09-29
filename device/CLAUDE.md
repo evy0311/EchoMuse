@@ -116,19 +116,17 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
   rather than a user preference, and it exists so the two paths can be A/B'd on
   one device without a controller round trip.
 
-  **The reference is scaled by the device's own volume, and this is what made
-  it work.** The tap is pre-volume, so left alone every volume change is a step
-  in the echo path gain that the filter can only find by re-converging. First
-  hardware run, 2026-08-29: cancellation collapsed to **−1.7dB** immediately
-  after a change and took 3–4s to recover, over and over, while `ref` sat at
-  4000–8000 through a `mic` swing of 1263→16766. We are not obliged to guess
-  the scalar — the device SETS that volume — so `SetPlaybackLevel` feeds it
-  from the existing volume-change callback and the reference is multiplied by
-  `10^((level−127)/40)`, the control's own 0.5dB-per-step law. Worth **32.7dB**
-  of residual in the frames after a change, in the test that reproduces it.
-  Software-tap frames are deliberately NOT scaled: that ring holds audio
-  written before the change, so the correction would land on the wrong
-  samples, and leaving it alone preserves the baseline being compared against.
+  **The reference needs no volume scaling, because the volume is applied
+  before it.** Until 2026-09-24 the volume was the DAC's own digital control,
+  downstream of the loopback, so every volume change was an echo-path gain
+  step the filter could only find by re-converging — cancellation collapsed
+  to −1.7dB after a change and took 3–4s to recover (2026-08-29), fixed then
+  by multiplying the reference by `10^((level−127)/40)`. Volume is now applied
+  to the PCM in the speaker's write loop (`speaker/swvolume.go`) with the DAC
+  held at unity, so the loopback and the software tap both carry post-volume
+  audio and the scalar is gone. The saved echo path is unaffected: it was
+  learned against a reference already scaled to the same level. **Do not
+  reintroduce a scalar** — it would apply the volume twice.
 
   **Unity gain on the extraction, non-negotiably.** Mic channels get
   `micGainDb` (+24dB default) applied pre-truncation because speech sits at
@@ -148,14 +146,12 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
   capture-stall trim all exist to approximate. Anyone rebuilding this path
   should start there rather than tuning the delay further.
 
-  Two bounds. It is **pre-volume** (unchanged across a commanded 33.5dB cut),
-  so it does not track loudness and the adaptive filter must find that gain
-  itself — no worse than the current tap, which is also pre-volume. And it does
-  not represent the acoustic echo once the DAC clips: at index 170 the mic's
-  loudest component is the *seventh* harmonic while the reference stays a clean
-  fundamental. Unreachable in shipping firmware, because `DEVICE_VOLUME_MAX`
-  caps the control at 127 for the distortion reason under Volume — but it is a
-  hard reason never to raise that ceiling.
+  Two bounds. It is **pre-DAC** (unchanged across a commanded 33.5dB DAC cut,
+  which is why moving the volume into software made it post-volume). And it
+  does not represent the acoustic echo once the DAC clips: at index 170 the
+  mic's loudest component is the *seventh* harmonic while the reference stays
+  a clean fundamental. Unreachable in shipping firmware, since the DAC is held
+  at unity (127) — but it is a hard reason never to raise that.
 - **Barge-in** (controller-side `_barge_watcher`) — wake word spoken during TTS cancels playback (device does a stateful `speaker_flush`: drains buffer + discards until stream EOS, since the rest of the stream is typically still in TCP buffers; controller-side, both `stream_speaker` and the post-playback drain sleep race `cancel_event`). `bargeInThreshold` is used as-is and sits *below* `owwThreshold` by design (0.05–0.10): echo at the mic is ~25dB louder than the person, so speech-over-TTS scores are depressed (~0.3–0.5 observed), while converged self-echo scores 0.002–0.003. **A barge must abort HA's run before starting the interrupting turn** — see the voice backend section in `controller/CLAUDE.md`
 - **AGC** (`internal/processor/`) — lock_mic turns only; release is frozen during silence (RMS speech flag), preventing noise floor amplification. (Device-side RNNoise NS was removed 2026-07-12 — noise suppression is controller-side now: `em_ns.py`/DTLN on the ASR-bound stream, per-device `nsAsr` flag)
 - **VAD** (lock_mic turns only) runs on pre-NS/AGC audio; opens gate after `VAD_SPEECH_MS` of speech, closes after `VAD_SILENCE_MS` of silence, then sends an end-of-speech sentinel
@@ -794,9 +790,87 @@ suspected** (#404). Crossover on two Dots on one desk, same room as the AP,
 24h against its neighbour's 2**, worst 20049ms against 4792ms, and 5
 keepalive timeouts against 0. Moving the proxy to the other device moved the
 fault within minutes and reproduced the same *rate* — 2.64/min against
-2.49/min — on different hardware. It is not RF coexistence: stock FireOS
-drove a Bluetooth speaker while streaming over WiFi, so the combo chip does
-both. It is our own traffic.
+2.49/min — on different hardware. This section used to conclude "It is not
+RF coexistence", on the grounds that stock FireOS drove a Bluetooth speaker
+while streaming over WiFi. **That was wrong, and the next section is what
+replaced it** — the traffic below was real, but most of the fault was the scan
+itself.
+
+### The LE scan costs the WiFi link, and the scan YIELDS for it (2026-09-23)
+
+Measured AP-side, from UniFi's per-client counters, which nobody had looked at:
+while a Dot scans, the AP resends **47-150% of the frames it sends that Dot**,
+against **0.2-0.4%** for other Amazon devices and an LG TV on the SAME radio
+at weaker signal (VVV at -43dBm: 66%; an Amazon device at -53dBm: 0.4%).
+Crossover both ways and on both userspaces: VVV (FireOS) 126% → 0.1% with the
+proxy off, 15LE (emOS) 168% → 0.2%, ping loss 8% → 0, RTT excursions gone. The
+frames that exhaust the AP's retries are lost, and TCP backing off over them
+is the multi-second "RTT", the choppy reply and the stuttering console.
+Absolute rates depend on the traffic (146% under server traffic, ~37%
+ping-only), so compare within one session only.
+
+What the bench (`tools/ble_probe`, `-tags bench` for `internal/bluetooth/bench.go`)
+established, so nobody repeats it:
+
+- **The chip ignores the scan interval and window.** 320/30, 1280/120, 1280/30
+  and 10240/3 caught the same adverts (~1000 in 4 min) and cost the same;
+  adverts arrive on a fixed 80ms grid whatever is asked. The payload is
+  spec-correct (Core Vol 4 Part E 7.8.10) and answers status 0.
+- **Bluetooth powered, reset and NOT scanning costs nothing** (0.0%). Only
+  the scan does.
+- **Amazon's vendor init does not fix it.** `libbluetooth_mtk.so` sends six
+  vendor commands, none of them coexistence; the likely one, sleep `0xFC7A`
+  `03 40 1f 40 1f 00 04` (from `/data/nvram/APCFG/APRDEB/BT_Addr`, struct
+  offset = file offset + 4), plus radio `0xFC79` and `0xFC93`, made no
+  difference. The kernel sends the chip only `coex_wmt_ant_mode` (1, shared
+  antenna); the rest of MediaTek's coex table is compiled out
+  (`CFG_SUBSYS_COEX_NEED 0`).
+- **Damage is proportional to time scanning and recovers at once.** Toggling
+  the scan from our side: 50% on → 15%, 25% → 7-18%, 10% → 3%, against ~37%
+  continuous in the same session. Adverts fall in the same proportion, so
+  there is no ratio that keeps Bermuda and frees the link.
+- **The antenna really is shared, so `coex_wmt_ant_mode=1` is right.** Two
+  antennas on the board, both fed from one source (FCC ID 2AHSE-2045 photos).
+- **WiFi power save does not help, and Amazon forces it off anyway.** The
+  driver replaces any power-save request with CAM for `"biscuit"` by name
+  (FireOS 6 GPL source, `wlan_oid.c:7216`). With that line removed in a kernel
+  built from Amazon's source, fast and max power save left AP resends where CAM
+  had them, and max multiplied control-link RTT excursions 4-6x (JOURNAL
+  2026-09-25). Do not rebuild the kernel to try it again.
+- **2.4GHz is worse, not better**: the shared-antenna cost is band-independent,
+  and 2.4 adds overlap with advertising channels 37/38 and slower frames — and
+  Amazon's driver caps 2.4GHz Block Ack at 2 frames on biscuit.
+- Every Dot reports BD address `00:00:46:81:63:01`, the NVRAM default.
+
+**So the scan runs whenever nothing needs the link and stops while something
+does** — `Scanner.Yield`, driven by a 100ms poll in `cmd/server.go` over a
+button turn streaming, a private-listening session open, a voice reply still
+arriving (`PcmSpeaker.VoiceArriving`, which also ends 2s after the last period
+so a lost EOS cannot hold it), and any shell session (console, OTA, asset
+pushes). Polled rather than set and cleared at each edge, so no missed "done"
+can leave the proxy quiet. Only the scan stops — `/dev/stpbt` stays open, so
+resuming is one HCI command — and the silence watchdog is disarmed while
+yielded, or it would re-initialise the chip mid-turn. `scanning` in the stats
+still means "session up"; `yields`/`yieldedMs` count the pauses.
+
+Why this shape: Bermuda (source, 2026-07) re-decides areas every 1.05s,
+refuses adverts older than 10s for an area contest and calls a device away
+after 30s, and even a continuous scan gave nearby devices a fresh advert in
+only 35-77% of its cycles. A voice turn's few seconds fit that; music does
+not (hours), so music gets BURSTS instead of a yield (`bluetooth.MusicDuty`,
+2026-09-27): 2s of scan every 7s, and none while less than 2.5s of music is
+buffered. The 7s cycle sits inside Bermuda's 10s area age for any device that
+advertises within the 2s burst. Scanning straight through music was the
+earlier rule and it failed: on VVV with Music Assistant, 23 RTT excursions
+over 250ms in 2.7 min (worst 2.1s) and 15+ audible dropouts, none with the
+proxy off. Music Assistant hands an HA media player a flow stream at 1.03x
+real time after a 3s burst, so the buffer never holds more than ~5s and cannot
+ride out a 2s stall. **Known gap:** the controller paces music from a clock
+estimate, not from the device's buffer, so after a real dropout the buffer
+stays low for the rest of that stream and the 2.5s floor keeps the scan off
+until it ends. The fix is a device-reported buffer level. A controller-scoring
+device's always-on stream does not count as a turn. Remaining idle loss
+(pings, keepalives) is for TCP tolerance to absorb, not the scanner.
 
 **The mechanism was our own traffic on the liveness channel.**
 `SendBleAdverts` wrote to the CONTROL WebSocket through `writeJSON`, which
@@ -869,9 +943,8 @@ arrival waits at most one tick, which nothing downstream can perceive.
 
 **Two things that look like the fix and are not:**
 
-- **Lowering the scan duty cycle.** 320ms/30ms is exactly
-  `esp32_ble_tracker`'s default, which is what every Bermuda deployment is
-  tuned against. Fine as a one-off diagnostic, wrong as a shipped value.
+- **Lowering the scan duty cycle.** The chip ignores it (above). 320/30 stays
+  because it is `esp32_ble_tracker`'s default, not because it does anything.
 - **`filter_duplicates=1` at the chip.** It suppresses identical
   advertisements — but RSSI is the field that varies and the field Bermuda
   consumes, so the chip filter discards the signal and keeps the noise.
@@ -896,8 +969,9 @@ Four things to know before picking this up:
   "reopening re-initialises the radio WiFi shares" text in `em_ble_proxy`'s
   warning is a hypothesis printed as a fact, and it produced a confident
   wrong call on the night — the timestamps rule it out. Fix that wording.
-- **It is not RF coexistence.** Stock FireOS drove a Bluetooth speaker while
-  streaming over WiFi.
+- **Coexistence costs the link while scanning** (see "The LE scan costs the
+  WiFi link"), so "not RF coexistence" no longer holds as a general
+  statement. Whether it explains these resets is untested.
 - **Memory pressure from the gate's table is RULED OUT — do not re-derive
   it.** The theory was that a 250ms buffer became a 5-minute retained table
   and cost GC pauses. The table is ~300 entries at ~200 bytes (privacy
@@ -974,6 +1048,20 @@ capacity, which bites well before any temperature reading looks alarming.
 
 ## Volume / mute persistence
 
+**Volume is applied in software, and the DAC stays at unity (2026-09-24).**
+`PcmSpeaker.SetVolume` scales each period after the output chain, ramped
+across one period so a change never lands as a step; the DAC's
+`PCM Playback Volume` sits at 127 while audio is live and is only used to
+mute around amp and stream changes. That is stock FireOS's arrangement
+(AudioFlinger attenuates, the DAC is never written). It was done so the wake
+sound (#120), mixed in AFTER the volume, plays at its own level whatever the
+volume — with the volume in the DAC nothing we write can escape it. The level
+keeps the control's law (0.5dB per step, unity at 127), so the controller, HA
+and stored `startupVolume` values are unchanged; level 0 is now true silence
+rather than −63.5dB. The speaker is silent until told a volume, and the
+volume controller applies its level the moment it is wired (`SetVolumeApply`),
+starting from 100, which is where Init used to leave the DAC.
+
 **The scale stops at the codec's unity gain, and that ceiling is load-bearing.**
 tinymix ctl 61 is the tlv320aic32x4 DAC *digital* volume: 176 steps of 0.5dB
 spanning −63.5…+24dB, with 0dB at index **127**. The firmware shipped
@@ -1046,6 +1134,31 @@ Playback ring clearing waits for the device's `playback_stats` (`device.playback
   live**: the ADC mute is hardware and its button LED is a GPIO, so it is the
   one control that works with no controller at all — and making it inert would
   hand back a live mic on reconnect, since mute is persisted in `state.json`.
+  **One action-button gesture is handled BEFORE that gate: a 5 s hold asks
+  to pair** (`client.PairHold` → `StartPairing`, `internal/client/pairing.go`),
+  since the device that cannot connect is the one that needs it. The press is
+  forwarded as usual (the controller ignores presses); the release ending the
+  hold is swallowed so it does not also reach HA as a long press. The window
+  is two minutes and closes early when the credential files change — the
+  approval installs new ones and bounces the link, and a redial still
+  carrying `pairing` would raise a second request for a device already paired.
+  **Three link rings, and they must stay three.** Orange pulse: no controller
+  answered. Orange with odd and even LEDs alternating: a controller answered
+  and refused this device (`errRefused`: a certificate our CA did not sign, or
+  the controller's `refused` message), which the owner fixes by holding the
+  button. White pulse: pending approval. The first two looked identical until
+  2026-09-26, so a device that needed pairing looked like one waiting for its
+  network. Run keeps whichever held state it is in across redials (`held`).
+- **On a FireOS 6 kernel the mute button LED is Amazon's, not ours.** Its
+  `amz_privacy` driver (`amz_priv.c`) owns gpio444, toggles its own state on
+  every mute release, can be put INTO privacy from software
+  (`privacy_trigger`) but never out, and always boots unmuted. So after a
+  reboot while muted the two ran opposite for good, including a lit button
+  over a live mic (15LE, 2026-09-26). `internal/bindings/led/privacy.go`
+  finds it by name; `server/privacy.go` reconciles after every press and at
+  boot, and every disagreement resolves to muted. FireOS 5's kernel has no
+  such driver and we drive gpio444 ourselves. Never read its
+  `power_button_state`: it blocked the console.
 - **Mute ring** (solid red) is device-sovereign — enforced since v2.7.8: controller LED writes are recorded but not painted while muted. Needed because muting now terminates an active turn (controller cancels + `speaker_flush` on `mute_state`), so the cancelled turn's LED cleanup arrives after the red ring is up.
 - **Volume arc** owns the ring for its 2s display window against *animations* — they repaint ~every 100ms and would otherwise stomp the arc within one frame. It does **not** outrank a deliberate action-button press: a dot release calls `CancelVolumeDisplay()`, which drops the hold so the listening frame paints (it deliberately does not repaint — the controller's frame lands within an RTT, and clearing to black would put a dark gap between the two). The arc is protection from repaint churn, not from the user. On expiry the ring repaints the latest `baseLEDs` frame (`onDisplayExpire` → `paintBaseLEDs`), handing back mid-animation. The arc shows only for physical volume button presses (v2.9.5): remote sets and the boot-time volume seed apply silently (`volumeController.Set` showRing flag). The mute-button LED is sysfs gpio444, active-high — not the gpio445 in Amazon's `libled_hal.so`, whose constant is off by one and whose pad is muxed away (stock drives the pin via the `/dev/mtgpio` ioctl; see `mute_button.go`).
 

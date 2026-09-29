@@ -241,7 +241,10 @@ type DataClient struct {
 
 	// listenGate decides what of the wake stream may leave the device when
 	// listenState is ListenLocal. Always present; idle in the other states.
-	listenGate  *listen.Gate
+	listenGate *listen.Gate
+	// wakeLevels holds the wake stream's recent frame levels, for the level
+	// sent on oww_wake (wakelevel.go).
+	wakeLevels  levelRing
 	listenState atomic.Value // string
 	// onListenEnd reports a session the device closed on its own (deadline,
 	// mute, link). Set once at wiring time.
@@ -490,6 +493,13 @@ func (d *DataClient) OpenListen(crossAt time.Time) (session uint32, ok bool) {
 	return d.listenGate.Open(crossAt, time.Now())
 }
 
+// ListenOpen reports whether a private-listening session is streaming the
+// user's words to the controller.
+func (d *DataClient) ListenOpen() bool {
+	_, open := d.listenGate.IsOpen()
+	return open
+}
+
 // AckListen and CloseListen apply the controller's listen_ack / listen_close.
 // Both ignore a session that is not the open one.
 func (d *DataClient) AckListen(session uint32) bool   { return d.listenGate.Ack(session) }
@@ -502,6 +512,12 @@ func (d *DataClient) CloseAnyListen(r listen.Reason) {
 
 // ListenFloor is the room noise floor tracked by the gate (RMS, 0..1).
 func (d *DataClient) ListenFloor() float64 { return d.listenGate.Floor() }
+
+// WakeLevel is the level and peak (dBFS, mic gain removed) of the wake word
+// whose last frame was stamped at; ok is false once that frame is gone.
+func (d *DataClient) WakeLevel(at time.Time) (level, peak float64, ok bool) {
+	return d.wakeLevels.measure(at)
+}
 
 func (d *DataClient) endListen(e *listen.End) {
 	if e == nil {
@@ -735,7 +751,7 @@ func (d *DataClient) Run(ctx context.Context) error {
 func (d *DataClient) connect(ctx context.Context, baseURL string) error {
 	creds := loadLinkCreds()
 	dialer := creds.dialer()
-	conn, _, err := dialer.DialContext(ctx, baseURL+"/data", creds.header())
+	conn, _, err := dialer.DialContext(ctx, baseURL+"/data", creds.headerFor(baseURL))
 	if err != nil {
 		return err
 	}
@@ -1290,6 +1306,7 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 					copy(chunk, buf[:vadOwwChunkBytes])
 					buf = buf[vadOwwChunkBytes:]
 					at := time.Now()
+					d.wakeLevels.push(at, vadPeriodRMS(chunk), gainLin)
 					// Score the SAME bytes on the SAME 80ms boundaries the
 					// controller receives in stream mode, so a device/controller
 					// score difference can only be the engine, not the framing.

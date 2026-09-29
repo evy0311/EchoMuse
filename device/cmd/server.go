@@ -31,6 +31,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/bluetooth"
 	"github.com/wilbowes/EchoMuse/internal/client"
 	"github.com/wilbowes/EchoMuse/internal/config"
+	"github.com/wilbowes/EchoMuse/internal/cue"
 	"github.com/wilbowes/EchoMuse/internal/listen"
 	"github.com/wilbowes/EchoMuse/internal/platform"
 	"github.com/wilbowes/EchoMuse/internal/server"
@@ -217,7 +218,13 @@ func main() {
 	controlClient.OnListen(func(kind string, session uint32) {
 		switch kind {
 		case "listen_ack":
-			dataClient.AckListen(session)
+			// The wake sound waits for the ack: it means this Echo won
+			// arbitration and has something to talk to, so one that cedes
+			// (or has no HA) stays silent. Costs one RTT against playing it
+			// at the crossing.
+			if dataClient.AckListen(session) {
+				playWakeCue(pcmSpeaker)
+			}
 		case "listen_close":
 			// A session the controller closes before confirming a duck is a
 			// wake it did not take (ceded, or refused): un-duck the music.
@@ -279,9 +286,45 @@ func main() {
 	})
 	applyBleConfig(bleScanner)
 
+	// The BLE scan costs this device's WiFi dearly (see Scanner.Yield), so it
+	// stops whenever the link carries something that cannot wait: the user's
+	// words going up (a button turn, or a private-listening session), a reply
+	// coming down, or a shell session (the console, OTA and asset pushes).
+	// Polled rather than signalled at each edge: the answer is recomputed from
+	// live state every tick, so no missed "done" can leave the proxy silent.
+	// Music gets bursts rather than a yield (bluetooth.MusicDuty).
+	go func() {
+		t := time.NewTicker(100 * time.Millisecond)
+		defer t.Stop()
+		duty := bluetooth.NewMusicDuty()
+		for now := range t.C {
+			music := duty.Yield(now, pcmSpeaker.MusicArriving(), pcmSpeaker.MusicLead())
+			bleScanner.Yield(music ||
+				dataClient.TurnStreamActive() ||
+				dataClient.ListenOpen() ||
+				pcmSpeaker.VoiceArriving() ||
+				controlClient.ShellActive())
+		}
+	}()
+
+	// A 5 s hold of the action button asks to pair (client/pairing.go). The
+	// white flash says the hold registered: on a connected device nothing
+	// else changes on the ring until an admin approves.
+	pairHold := client.NewPairHold(func() {
+		s.Flash(150, 150, 150, 400*time.Millisecond)
+		controlClient.StartPairing()
+	})
+
 	// Button events — forward to controller via control plane
 	_, err = buttonController.SubscribeToButton(func(event pkgbuttons.ButtonClickEvent) {
 		log.Printf("Button event: clickType=%d down=%v", event.ClickType, event.Down)
+		// Ahead of the link-down gate: a device that cannot connect is the one
+		// that most needs to ask. The release ending a pairing hold is not
+		// forwarded, so it does not also reach HA as a long press.
+		if event.ClickType == pkgbuttons.DotClick && pairHold.Event(event.Down) {
+			log.Println("[cmd] action button release ended a pairing hold — not forwarded")
+			return
+		}
 		// Inert without a controller session: the dot cannot start a turn
 		// with nothing to send it to, and the ring flash CancelVolumeDisplay
 		// produces would acknowledge a press that achieves nothing. Dropped
@@ -400,6 +443,25 @@ func main() {
 		go pulseWhite(pulseCtx, s)
 	})
 
+	// Refused — a controller answered and would not accept this device's
+	// credentials. Orange like disconnected, since it is a link problem, but
+	// alternating odd and even LEDs, so it reads differently: this one the
+	// owner can fix, by holding the action button 5 s to pair.
+	controlClient.OnRefused(func() {
+		s.StopAnim()
+		if pulseKind == "refused" {
+			return
+		}
+		if pulseCancel != nil {
+			pulseCancel()
+		}
+		pulseCtx, cancel := context.WithCancel(ctx)
+		pulseCancel = cancel
+		pulseKind = "refused"
+		s.SetLinkDown(true)
+		go pulseRefused(pulseCtx, s)
+	})
+
 	// Connected — stop pulse, report current mute state, restore ring or hand
 	// back to direction arc depending on mute state.
 	controlClient.OnConnected(func() {
@@ -479,6 +541,17 @@ func main() {
 		applyBleConfig(bleScanner)
 		applyShadowConfig(dataClient, controlClient, pcmSpeaker, s)
 		syncListenState(dataClient, controlClient, false)
+	})
+
+	// Wake sound on request (#120), for wakes outside a private-listening
+	// session; the controller sends it only once the wake has won
+	// arbitration. A session's wake sound plays on its listen_ack instead.
+	controlClient.OnPlayCue(func(name string) {
+		if name != "wake" {
+			log.Printf("[cue] unknown cue %q — ignored", name)
+			return
+		}
+		playWakeCue(pcmSpeaker)
 	})
 
 	// Speaker flush — barge-in: cut buffered TTS the moment the controller
@@ -597,30 +670,20 @@ func main() {
 		}
 	})
 
+	// Volume is applied in software by the speaker; the DAC stays at unity.
+	// The hardware echo reference is the bytes written to ALSA, so it is
+	// post-volume by construction and the canceller needs no scalar.
+	if pcmSpeaker != nil {
+		s.SetVolumeApply(pcmSpeaker.SetVolume)
+	}
 	// Volume change — notify controller so HA entity and dashboard reflect it.
 	// Fires on every Set() call: physical button press or future volume_set command.
 	s.SetVolumeChangeCallback(func(level int) {
 		controlClient.SendVolumeState(level)
-		// The hardware echo reference is tapped upstream of the DAC volume
-		// control, so it holds full scale whatever the user sets. Tell the
-		// canceller the scalar it cannot see, or every volume change is an
-		// echo-path gain step the adaptive filter can only find by
-		// re-converging — measured on 2026-08-29 as cancellation dropping to
-		// -1.7dB after a change and taking 3-4s to recover, repeatedly.
-		canceller.SetPlaybackLevel(level)
 	})
-	// Seed it from where the device actually is, right now. The callback
-	// above only fires on a CHANGE, and the two things that would produce
-	// one at startup both have holes: SeedVolume is skipped entirely when
-	// the controller pushes startupVolume=0 (a device it has no record
-	// for), and Set() is a no-op-shaped path nothing guarantees runs. Miss
-	// it and refScale stays 0 — read as unity — while the codec sits at
-	// whatever level the previous run left behind, which is round one's
-	// 33dB-hot reference reappearing on a device nobody touched.
-	canceller.SetPlaybackLevel(s.VolumeLevel())
 
 	// Volume set from controller (HA MediaPlayerCommandRequest forwarded down).
-	// Calls Set() which applies tinymix, updates LEDs, and fires the change
+	// Calls Set() which applies the volume, updates LEDs, and fires the change
 	// callback above — so SendVolumeState fires automatically, closing the loop.
 	controlClient.OnVolumeSet(func(level int) {
 		s.SetVolume(level)
@@ -675,11 +738,22 @@ func main() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		tick := 0
+		// Drained only here, on this one goroutine, so LinkLoss needs no lock;
+		// the on-connect snapshot above simply leaves the fields unset.
+		var upLoss client.LinkLoss
 		for range ticker.C {
 			st := collectStats()
 			st.Ble = bleScanner.Stats()
 			st.OwwShadow = shadowStats(dataClient)
 			st.AecRef = canceller.RefSource()
+			var snaps []client.TCPSnap
+			if sn, ok := controlClient.TCPSnapshot(); ok {
+				snaps = append(snaps, sn)
+			}
+			if sn, ok := dataClient.TCPSnapshot(); ok {
+				snaps = append(snaps, sn)
+			}
+			st.TcpUpRetrans, st.TcpUpSegs = upLoss.Drain(snaps...)
 			controlClient.SendStats(st)
 			if tick%10 == 0 {
 				var ms runtime.MemStats
@@ -1199,6 +1273,35 @@ func actsOnCrossings(mode string) string {
 	return "reporting only, not triggering"
 }
 
+// wakeCues holds the cue at each level, rendered once: rendering on the wake
+// path would put ~12k sin() calls between hearing the wake word and
+// confirming it.
+var wakeCues = func() map[string][]float64 {
+	m := make(map[string][]float64, len(cue.Levels))
+	for _, lv := range cue.Levels {
+		m[lv] = cue.WakeCue(speakerRate, cue.LevelDBFS(lv))
+	}
+	return m
+}()
+
+// playWakeCue plays the wake sound at its configured level, if it is on.
+// Anything unrecognised plays medium.
+func playWakeCue(spk *speaker.PcmSpeaker) {
+	on, level := config.Get().WakeSoundSetting()
+	if !on || spk == nil {
+		return
+	}
+	c, ok := wakeCues[level]
+	if !ok {
+		c = wakeCues[cue.LevelMedium]
+	}
+	spk.PlayCue(c)
+}
+
+// speakerRate mirrors the speaker binding's rate, declared here so this file
+// still builds on a host, where the //go:build server binding does not.
+const speakerRate = 48000
+
 // onWakeCrossing is what a threshold crossing does, decided fresh each time
 // from the current config rather than at scorer-construction time.
 //
@@ -1273,7 +1376,12 @@ func onWakeCrossing(cc *client.ControlClient, dc *client.DataClient,
 		localDuck.Start(config.Get().DuckDb)
 	}
 	barge := spk != nil && spk.VoiceAudible(wakeword.ScoreSpan)
-	cc.SendOwwWake(score, crossed, at, session, dc.ListenFloor(), barge)
+	level, peak, ok := dc.WakeLevel(at)
+	var lv *client.WakeLevel
+	if ok {
+		lv = &client.WakeLevel{Level: level, Peak: peak}
+	}
+	cc.SendOwwWake(score, crossed, at, session, dc.ListenFloor(), barge, lv)
 }
 
 // syncListenState resolves what the device does with its wake stream and
@@ -1344,6 +1452,39 @@ func pulseOrange(ctx context.Context, s *server.Server) {
 			t := pulsePhase(start, period)
 			br := minBr + (maxBr-minBr)*(0.5+0.5*math.Sin(2*math.Pi*t))
 			s.SetLEDs(allLEDs(uint8(255*br), uint8(40*br), 0), nil)
+		}
+	}
+}
+
+// pulseRefused — orange, odd and even LEDs crossfading against each other,
+// while a controller refuses this device's credentials. Same colour as
+// pulseOrange (a link problem), different shape (one the owner can fix).
+func pulseRefused(ctx context.Context, s *server.Server) {
+	const (
+		minBr  = 0.03
+		maxBr  = 0.6
+		period = 1200 * time.Millisecond
+		stepMs = 50
+	)
+	ticker := time.NewTicker(stepMs * time.Millisecond)
+	defer ticker.Stop()
+	start := time.Now()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			a := 0.5 + 0.5*math.Sin(2*math.Pi*pulsePhase(start, period))
+			leds := allLEDs(0, 0, 0)
+			for i := range leds {
+				w := a
+				if i%2 == 1 {
+					w = 1 - a
+				}
+				br := minBr + (maxBr-minBr)*w
+				leds[i].R, leds[i].G = uint8(255*br), uint8(40*br)
+			}
+			s.SetLEDs(leds, nil)
 		}
 	}
 }
