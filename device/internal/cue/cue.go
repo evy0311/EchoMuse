@@ -48,6 +48,14 @@ const (
 	// the output chain's crossfade exists to avoid, arrived at from the
 	// other direction. 4ms is inaudible as a fade and completely removes it.
 	edgeMS = 4.0
+
+	// The volume cue is one neutral note rather than the wake cue's rising
+	// interval: it confirms a level change without saying "I'm listening".
+	// Its peak is scaled by the device volume passed to VolumeCue, so it is
+	// useful as an audible preview of that level rather than a fixed alert.
+	volumeHz     = 880.0
+	volumeMS     = 90.0
+	volumePeakDB = -6.0
 )
 
 // The wake sound's three levels, as set by `wakeSoundLevel`.
@@ -92,6 +100,21 @@ func WakeCue(sampleRate int, peakDBFS float64) []float64 {
 	out = append(out, make([]float64, gap)...)
 	out = append(out, bong...)
 	return out
+}
+
+// VolumeCue renders the physical-volume-button confirmation tone. volumeGain
+// is the linear gain for the NEW device volume (speaker.VolumeGain at the call
+// site). The cue mixer sits after software volume, so the gain is baked into
+// these samples exactly once.
+func VolumeCue(sampleRate int, volumeGain float64) []float64 {
+	if volumeGain <= 0 {
+		return nil
+	}
+	if volumeGain > 1 {
+		volumeGain = 1
+	}
+	peak := math.Pow(10, volumePeakDB/20.0) * 32768.0 * volumeGain
+	return note(float64(sampleRate), volumeHz, volumeMS, peak)
 }
 
 // note renders one tone with raised-cosine edges and a gentle decay.

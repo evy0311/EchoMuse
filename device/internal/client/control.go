@@ -1224,12 +1224,15 @@ func capabilities() []string {
 	// Without it the dashboard shows the toggle disabled, since a switch that
 	// saves and makes no sound fails the person it exists for.
 	//
+	// "volume_cue": this firmware can play a physical-button volume preview
+	// at the new level, and suppress it while voice or music is audible.
+	//
 	// "pairing": this firmware asks to pair itself when its owner holds the
 	// action button 5 s (pairing.go). Without it the controller offers the
 	// admin a Pair action instead, since the device cannot ask.
 	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons",
 		"oww_shadow", "oww_trigger", "button_hold", "audio_mix",
-		"aec_hw_ref", "oww_local_only", "output_chain", "wake_cue", "pairing"}
+		"aec_hw_ref", "oww_local_only", "output_chain", "wake_cue", "volume_cue", "pairing"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}

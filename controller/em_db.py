@@ -53,6 +53,9 @@ DEFAULT_DEVICE_CONFIG = {
     # first, because the ring is the only other sign the Echo is listening.
     "wakeSound":        False,
     "wakeSoundLevel":   "medium",   # quiet / medium / loud, played by the Echo
+    # Physical-button volume preview (#637). Off by default so an upgrade
+    # does not make an established fleet start producing new sounds.
+    "volumeButtonSound": False,
     "adcDigitalGain":   88,
     "adcMicpga":        40,
     # micGainDb: fixed digital gain (dB) the device applies to the full

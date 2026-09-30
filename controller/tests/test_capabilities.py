@@ -87,6 +87,19 @@ def test_shadow_capability_is_surfaced_to_the_dashboard():
         "the dashboard must gate the on-device toggle on the capability"
 
 
+def test_volume_cue_capability_is_surfaced_to_the_dashboard():
+    """Old firmware must not be offered a switch it cannot honour."""
+    caps = device_capabilities()
+    assert "volume_cue" in caps, "firmware no longer announces volume_cue"
+    assert "volume_cue_capable" in CONTROLLER.read_text(), \
+        "em_controller must expose the volume cue capability as a property"
+    assert "volumeCueCapable" in API.read_text(), \
+        "/api/devices must surface the volume cue capability"
+    jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
+    assert "volumeCueCapable" in jsx, \
+        "the dashboard must gate the volume button sound on the capability"
+
+
 def test_triggering_is_a_separate_capability_from_scoring():
     """
     Shadow shipped first, so there is firmware in the field that scores the

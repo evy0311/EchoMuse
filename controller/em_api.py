@@ -6050,6 +6050,7 @@ def _merge_device(row) -> dict:
         "owwLocalCapable": getattr(live, "oww_local_capable", False) if live else False,
         "listen":          _listen_json(live) if live else None,
         "wakeCueCapable": getattr(live, "wake_cue_capable", False) if live else False,
+        "volumeCueCapable": getattr(live, "volume_cue_capable", False) if live else False,
         "audioMixCapable": getattr(live, "audio_mix_capable", False) if live else False,
         # Gates the AEC delay slider, which only means anything on the
         # software tap. Paired with aecRef because the capability says the

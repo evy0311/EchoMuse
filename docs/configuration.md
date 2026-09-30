@@ -215,6 +215,12 @@ rather than spending presses near the bottom of a scale where nothing is
 audible — silencing the device is the mute button's job. The cyan ring
 spans that same range, so a press always moves it.
 
+**Volume button sound** plays a short tone at the newly selected volume when
+you change it with the Dot's physical buttons while the speaker is idle. It
+stays silent for Home Assistant volume changes and while voice or music is
+already playing. The switch follows the Playback section's Fleet / Device
+scope and is off by default.
+
 Mute is remembered too, but by the device itself: a muted Dot stays muted
 through reboots, power cuts, and firmware updates — red ring and all —
 whether or not the controller is reachable.

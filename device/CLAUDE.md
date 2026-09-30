@@ -1100,6 +1100,16 @@ calls are deliberately **not** floored — HA's volume 0.0 must still mean
 silent — and a press from below the floor lands *on* it, so one press always
 reaches audible.
 
+`volumeButtonSound` is the optional physical-button preview (#637). It plays
+only when the button actually changes the level and both voice and music have
+been quiet for 100ms; HA/controller volume sets never play it. The cue mixer
+sits after software volume for the wake sound's sake, so `VolumeCue` receives
+`speaker.VolumeGain(newLevel)` and bakes that gain into its samples exactly
+once. Repeated button presses replace the in-flight cue instead of queueing.
+The dashboard gates the setting on `volume_cue`, separate from `wake_cue`, so
+firmware that can play wake sounds but predates the volume behaviour is not
+offered a switch it will ignore.
+
 Volume is **state, not a setting** — it rides the config channel but has no dashboard control (the slider was removed 2026-07-25: `SeedVolume` ignores later pushes, so moving it did nothing until the device restarted and any real volume change overwrote it). It is listed in `em_config_sections.STATE_KEYS`, exempt from section scoping, and shown read-only on the Status tab.
 
 Volume persists through reboots **controller-side**: every device `volume_state` report is stored into the device's `startupVolume` config, and the device restores it via `Server.SeedVolume` on the **first config push per run only** (later pushes must not stomp live changes). Until seeded (or a local volume change makes the device authoritative), the device suppresses its connect-time `volume_state` report — reporting the boot-default level is what used to clobber the stored value on reboot. Mute is the opposite: **device-sovereign**, persisted locally in `/data/local/etc/echomuse/state.json` (survives OTA slot flips; written on toggle, restored at boot pre-connect — ADC mute immediately, red ring/button LED after LED init).

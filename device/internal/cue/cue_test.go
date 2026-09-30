@@ -135,6 +135,31 @@ func TestRendersAtOtherRates(t *testing.T) {
 	}
 }
 
+func TestVolumeCueTracksTheSelectedVolume(t *testing.T) {
+	full := VolumeCue(rate, 1)
+	quiet := VolumeCue(rate, 0.1)
+	if len(full) == 0 || len(quiet) != len(full) {
+		t.Fatalf("volume cues have lengths full=%d quiet=%d", len(full), len(quiet))
+	}
+	peak := func(samples []float64) float64 {
+		var out float64
+		for _, v := range samples {
+			out = math.Max(out, math.Abs(v))
+		}
+		return out
+	}
+	ratio := peak(quiet) / peak(full)
+	if math.Abs(ratio-0.1) > 0.001 {
+		t.Errorf("quiet/full peak ratio = %.4f, want 0.1", ratio)
+	}
+	if full[0] != 0 || math.Abs(full[len(full)-1]) > 1e-9 {
+		t.Error("volume cue must fade from and to zero")
+	}
+	if got := VolumeCue(rate, 0); got != nil {
+		t.Errorf("zero volume rendered %d samples, want silence", len(got))
+	}
+}
+
 // Writes the cue as a WAV for a listening test. Off by default — this is for
 // auditioning a taste parameter, which no assertion can settle.
 //
