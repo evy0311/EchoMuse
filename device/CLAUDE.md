@@ -1106,7 +1106,9 @@ only when the button actually changes the level and both voice and music have
 been quiet for 100ms; HA/controller volume sets never play it. The cue mixer
 sits after software volume for the wake sound's sake, so `VolumeCue` receives
 `speaker.VolumeGain(newLevel)` and bakes that gain into its samples exactly
-once. Repeated button presses replace the in-flight cue instead of queueing.
+once. The cue is a low, quickly damped A3 chime with a small downward settle —
+the factory-like "duhn" requested in device testing, not the first 880Hz beep.
+Repeated button presses replace the in-flight cue instead of queueing.
 The dashboard gates the setting on `volume_cue`, separate from `wake_cue`, so
 firmware that can play wake sounds but predates the volume behaviour is not
 offered a switch it will ignore.

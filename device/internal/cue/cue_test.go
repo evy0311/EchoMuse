@@ -160,6 +160,33 @@ func TestVolumeCueTracksTheSelectedVolume(t *testing.T) {
 	}
 }
 
+func TestVolumeCueIsALowDampedChime(t *testing.T) {
+	c := VolumeCue(rate, 1)
+	wantLen := int(rate * volumeMS / 1000)
+	if len(c) != wantLen {
+		t.Fatalf("volume cue has %d samples, want %d", len(c), wantLen)
+	}
+	if volumeHz >= BingHz/2 {
+		t.Fatalf("volume cue %.0fHz is not materially below the %.0fHz wake cue", volumeHz, BingHz)
+	}
+
+	// A struck note gives most of its energy to the attack and dies away. A
+	// flat electronic beep would have comparable RMS at both ends.
+	rms := func(x []float64) float64 {
+		var sum float64
+		for _, v := range x {
+			sum += v * v
+		}
+		return math.Sqrt(sum / float64(len(x)))
+	}
+	third := len(c) / 3
+	attack := rms(c[:third])
+	tail := rms(c[len(c)-third:])
+	if attack < tail*3 {
+		t.Errorf("volume cue does not decay like a struck chime: attack RMS %.1f, tail %.1f", attack, tail)
+	}
+}
+
 // Writes the cue as a WAV for a listening test. Off by default — this is for
 // auditioning a taste parameter, which no assertion can settle.
 //

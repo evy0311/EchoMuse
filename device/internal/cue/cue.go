@@ -49,13 +49,19 @@ const (
 	// other direction. 4ms is inaudible as a fade and completely removes it.
 	edgeMS = 4.0
 
-	// The volume cue is one neutral note rather than the wake cue's rising
-	// interval: it confirms a level change without saying "I'm listening".
+	// The volume cue is a low, struck chime rather than the wake cue's bright
+	// rising interval: it confirms a level change without saying "I'm
+	// listening". The pitch starts a little sharp and settles quickly onto A3,
+	// giving it the short "duhn" shape of a damped bell instead of a high
+	// electronic beep. 220Hz also sits in the range stock's speaker correction
+	// supports strongly on this small driver (#247).
+	//
 	// Its peak is scaled by the device volume passed to VolumeCue, so it is
 	// useful as an audible preview of that level rather than a fixed alert.
-	volumeHz     = 880.0
-	volumeMS     = 90.0
-	volumePeakDB = -6.0
+	volumeHz        = 220.0 // A3
+	volumeStartRise = 0.28  // begin 28% sharp, then settle onto volumeHz
+	volumeMS        = 145.0
+	volumePeakDB    = -6.0
 )
 
 // The wake sound's three levels, as set by `wakeSoundLevel`.
@@ -114,7 +120,50 @@ func VolumeCue(sampleRate int, volumeGain float64) []float64 {
 		volumeGain = 1
 	}
 	peak := math.Pow(10, volumePeakDB/20.0) * 32768.0 * volumeGain
-	return note(float64(sampleRate), volumeHz, volumeMS, peak)
+	return struckChime(float64(sampleRate), volumeHz, volumeMS, peak)
+}
+
+// struckChime renders the low, damped volume-button "duhn". Its pitch bend is
+// continuous (phase is accumulated sample by sample), so settling the note
+// cannot introduce the click a two-burst implementation would. A brief second
+// harmonic supplies the attack that lets a 220Hz fundamental read on this
+// speaker, then gets out of the way faster than the body of the note.
+func struckChime(fs, freq, ms, amp float64) []float64 {
+	n := int(fs * ms / 1000.0)
+	if n <= 0 {
+		return nil
+	}
+	edge := int(fs * edgeMS / 1000.0)
+	if edge*2 > n {
+		edge = n / 2
+	}
+
+	out := make([]float64, n)
+	phase := 0.0
+	for i := 0; i < n; i++ {
+		x := float64(i) / float64(n)
+		// The sharp attack settles during the first half of the note. Keeping
+		// the tail close to A3 is what makes it sound struck rather than swept.
+		instantHz := freq * (1 + volumeStartRise*math.Exp(-7*x))
+		phase += 2 * math.Pi * instantHz / fs
+
+		body := math.Sin(phase)
+		attack := 0.24 * math.Sin(2*phase) * math.Exp(-8*x)
+		decay := math.Exp(-4.8 * x)
+
+		// Raised-cosine edges always win over the decay, guaranteeing silence
+		// at both ends and no button-click discontinuity.
+		env := 1.0
+		if i < edge {
+			env = 0.5 * (1 - math.Cos(math.Pi*float64(i)/float64(edge)))
+		} else if i >= n-edge {
+			k := float64(n - 1 - i)
+			env = 0.5 * (1 - math.Cos(math.Pi*k/float64(edge)))
+		}
+
+		out[i] = amp * (body + attack) * decay * env / 1.24
+	}
+	return out
 }
 
 // note renders one tone with raised-cosine edges and a gentle decay.
