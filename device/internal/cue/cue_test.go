@@ -185,6 +185,11 @@ func TestVolumeCueIsALowDampedChime(t *testing.T) {
 	if attack < tail*3 {
 		t.Errorf("volume cue does not decay like a struck chime: attack RMS %.1f, tail %.1f", attack, tail)
 	}
+	for i, v := range c {
+		if v > math.MaxInt16 || v < math.MinInt16 {
+			t.Fatalf("full-volume cue clips at sample %d: %.1f", i, v)
+		}
+	}
 }
 
 // Writes the cue as a WAV for a listening test. Off by default — this is for

@@ -61,7 +61,11 @@ const (
 	volumeHz        = 220.0 // A3
 	volumeStartRise = 0.28  // begin 28% sharp, then settle onto volumeHz
 	volumeMS        = 145.0
-	volumePeakDB    = -6.0
+	// The cue bypasses EQ/output processing so its timbre is invariant, but
+	// follows the same VolumeGain curve as playback. -2dBFS is a 4dB lift over
+	// the first audition — exactly one physical-button step — to put the short,
+	// low-decay sound closer to the perceived level of ordinary programme audio.
+	volumePeakDB = -2.0
 )
 
 // The wake sound's three levels, as set by `wakeSoundLevel`.
