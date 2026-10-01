@@ -9330,7 +9330,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                   ? 'plays a short tone at the new volume when the speaker is idle'
                   : 'needs newer firmware on this Echo'}
                 disabled={!volumeCueCapable}
-                value={config.volumeButtonSound ?? false}
+                value={config.volumeButtonSound ?? true}
                 onChange={v => set('volumeButtonSound', v)}/>
             </div>
           </div>

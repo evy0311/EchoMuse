@@ -2,6 +2,14 @@ package config
 
 import "testing"
 
+func TestVolumeButtonSoundDefaultsOn(t *testing.T) {
+	d := &Device{}
+	d.Apply(ConfigMessage{})
+	if !d.VolumeButtonSoundEnabled() {
+		t.Fatal("volume button sound defaulted off")
+	}
+}
+
 func TestVolumeButtonSoundCanBeTurnedOff(t *testing.T) {
 	d := &Device{}
 	on := true

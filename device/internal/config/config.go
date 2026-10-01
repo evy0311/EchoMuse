@@ -176,7 +176,7 @@ func (d *Device) loadDefaults() {
 	d.VadSpeechMs = envInt("VAD_SPEECH_MS", 80)
 	d.VadSilenceMs = envInt("VAD_SILENCE_MS", 600)
 	d.StartupVolume = envInt("STARTUP_VOLUME", 85)
-	d.VolumeButtonSound = envBool("VOLUME_BUTTON_SOUND", false)
+	d.VolumeButtonSound = envBool("VOLUME_BUTTON_SOUND", true)
 	d.OwwThreshold = envFloat("OWW_THRESHOLD", 0.5)
 	d.OwwModel = envStr("OWW_MODEL", "hey_jarvis_v0.1")
 	d.OwwOnDevice = normaliseOnDevice(envStr("OWW_ON_DEVICE", OnDeviceOff))
