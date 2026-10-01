@@ -199,7 +199,8 @@ func TestVolumeCueIsALowDampedChime(t *testing.T) {
 	}
 
 	// A struck note gives most of its energy to the attack and dies away. A
-	// flat electronic beep would have comparable RMS at both ends.
+	// flat electronic beep would have comparable RMS at both ends, while the
+	// quiet reflections intentionally leave more tail than the dry thud did.
 	rms := func(x []float64) float64 {
 		var sum float64
 		for _, v := range x {
@@ -210,8 +211,17 @@ func TestVolumeCueIsALowDampedChime(t *testing.T) {
 	third := len(c) / 3
 	attack := rms(c[:third])
 	tail := rms(c[len(c)-third:])
-	if attack < tail*3 {
+	if attack < tail*2 {
 		t.Errorf("volume cue does not decay like a struck chime: attack RMS %.1f, tail %.1f", attack, tail)
+	}
+
+	// The dry strike has ended by this point. There should still be a modest
+	// ambience tail, proving the reflections were rendered, but it must remain
+	// subordinate to the attack rather than sound like another button press.
+	dryEnd := int(rate * volumeBodyMS / 1000)
+	ambience := rms(c[dryEnd:])
+	if ambience < attack*0.01 || ambience > attack*0.25 {
+		t.Errorf("volume cue ambience RMS %.1f is not subtle relative to attack %.1f", ambience, attack)
 	}
 	for i, v := range c {
 		if v > math.MaxInt16 || v < math.MinInt16 {

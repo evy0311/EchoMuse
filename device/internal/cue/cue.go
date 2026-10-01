@@ -53,14 +53,23 @@ const (
 	// rising interval: it confirms a level change without saying "I'm
 	// listening". The pitch starts a little sharp and settles quickly onto A3,
 	// giving it the short "duhn" shape of a damped bell instead of a high
-	// electronic beep. 220Hz also sits in the range stock's speaker correction
-	// supports strongly on this small driver (#247).
+	// electronic beep. A quiet E4 resonance and two overlapping reflections
+	// add a little tone and space without turning it into a repeated alert.
+	// 220Hz also sits in the range stock's speaker correction supports strongly
+	// on this small driver (#247).
 	//
 	// Its peak is scaled by the device volume passed to VolumeCue, so it is
 	// useful as an audible preview of that level rather than a fixed alert.
 	volumeHz        = 220.0 // A3
 	volumeStartRise = 0.28  // begin 28% sharp, then settle onto volumeHz
-	volumeMS        = 145.0
+	volumeBodyMS    = 145.0
+	volumeEcho1MS   = 38.0
+	volumeEcho2MS   = 74.0
+	volumeEcho1Gain = 0.16
+	volumeEcho2Gain = 0.08
+	volumeRingRatio = 1.5 // E4: a restrained fifth above the A3 body
+	volumeRingGain  = 0.10
+	volumeMS        = volumeBodyMS + volumeEcho2MS
 	// The cue bypasses EQ/output processing so its timbre is invariant, but
 	// follows the same VolumeGain curve as playback. This is the REAL rendered
 	// peak after the struck envelope, not merely its oscillator drive; keeping
@@ -141,22 +150,27 @@ func VolumeButtonPreviewDue(direction string, changed, atMax bool) bool {
 // continuous (phase is accumulated sample by sample), so settling the note
 // cannot introduce the click a two-burst implementation would. A brief second
 // harmonic supplies the attack that lets a 220Hz fundamental read on this
-// speaker, then gets out of the way faster than the body of the note.
+// speaker, while a quieter fifth and two overlapping reflections leave a
+// short, tonal ambience tail instead of an obvious second strike.
 func struckChime(fs, freq, ms, amp float64) []float64 {
 	n := int(fs * ms / 1000.0)
 	if n <= 0 {
 		return nil
 	}
+	bodyN := int(fs * volumeBodyMS / 1000.0)
+	if bodyN > n {
+		bodyN = n
+	}
 	edge := int(fs * edgeMS / 1000.0)
-	if edge*2 > n {
-		edge = n / 2
+	if edge*2 > bodyN {
+		edge = bodyN / 2
 	}
 
 	out := make([]float64, n)
+	dry := make([]float64, bodyN)
 	phase := 0.0
-	rawPeak := 0.0
-	for i := 0; i < n; i++ {
-		x := float64(i) / float64(n)
+	for i := 0; i < bodyN; i++ {
+		x := float64(i) / float64(bodyN)
 		// The sharp attack settles during the first half of the note. Keeping
 		// the tail close to A3 is what makes it sound struck rather than swept.
 		instantHz := freq * (1 + volumeStartRise*math.Exp(-7*x))
@@ -164,6 +178,9 @@ func struckChime(fs, freq, ms, amp float64) []float64 {
 
 		body := math.Sin(phase)
 		attack := 0.24 * math.Sin(2*phase) * math.Exp(-8*x)
+		// The fifth decays a little more slowly than the body, leaving a quiet
+		// pitched ring after the percussive attack has receded.
+		resonance := volumeRingGain * math.Sin(volumeRingRatio*phase+0.4) * math.Exp(-3*x)
 		decay := math.Exp(-4.8 * x)
 
 		// Raised-cosine edges always win over the decay, guaranteeing silence
@@ -171,13 +188,37 @@ func struckChime(fs, freq, ms, amp float64) []float64 {
 		env := 1.0
 		if i < edge {
 			env = 0.5 * (1 - math.Cos(math.Pi*float64(i)/float64(edge)))
-		} else if i >= n-edge {
-			k := float64(n - 1 - i)
+		} else if i >= bodyN-edge {
+			k := float64(bodyN - 1 - i)
 			env = 0.5 * (1 - math.Cos(math.Pi*k/float64(edge)))
 		}
 
-		out[i] = (body + attack) * decay * env
-		rawPeak = math.Max(rawPeak, math.Abs(out[i]))
+		dry[i] = ((body+attack)*decay + resonance) * env
+	}
+
+	// These delays overlap the original strike, so they read as a small room
+	// around it rather than three separate button sounds.
+	for _, reflection := range []struct {
+		delayMS float64
+		gain    float64
+	}{
+		{0, 1},
+		{volumeEcho1MS, volumeEcho1Gain},
+		{volumeEcho2MS, volumeEcho2Gain},
+	} {
+		delay := int(fs * reflection.delayMS / 1000.0)
+		for i, sample := range dry {
+			if at := delay + i; at < len(out) {
+				out[at] += sample * reflection.gain
+			}
+		}
+	}
+
+	// Normalise after the reflections are mixed: they change the waveform's
+	// crest factor, but must not change its promised maximum-volume peak.
+	rawPeak := 0.0
+	for _, sample := range out {
+		rawPeak = math.Max(rawPeak, math.Abs(sample))
 	}
 	if rawPeak > 0 {
 		scale := amp / rawPeak

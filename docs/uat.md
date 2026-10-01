@@ -206,8 +206,9 @@ set to **On this Echo** and the other to **On the controller**.
 buttons while idle, press Volume Up twice more after reaching maximum, then
 change it from HA; repeat both while music is playing.
 **Expect:** The level agrees and survives a reboot. An idle physical-button
-change plays the tone at the new volume, and each extra Volume Up press at
-maximum replays it; HA and active playback stay silent.
+change plays a low tone with a subtle resonant tail at the new volume, and each
+extra Volume Up press at maximum replays it; HA and active playback stay
+silent.
 **Flag:** A tone from a remote change or over playback, or no tone from an
 idle physical-button change or an extra Volume Up press at maximum.
 

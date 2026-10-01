@@ -1106,8 +1106,10 @@ only when the button actually changes the level and both voice and music have
 been quiet for 100ms; HA/controller volume sets never play it. The cue mixer
 sits after software volume for the wake sound's sake, so `VolumeCue` receives
 `speaker.VolumeGain(newLevel)` and bakes that gain into its samples exactly
-once. The cue is a low, quickly damped A3 chime with a small downward settle —
-the factory-like "duhn" requested in device testing, not the first 880Hz beep.
+once. The cue is a low, quickly damped A3 chime with a small downward settle,
+a quiet E4 resonance, and two overlapping reflections — the factory-like
+"duhn" requested in device testing with a subtle tonal ambience, not the first
+880Hz beep.
 Its rendered peak is normalised to -0.5dBFS at maximum volume; it still bypasses
 EQ and the output chain so its timbre never changes, while `VolumeGain` makes
 its level follow playback's 0.5dB-per-index law. An extra Volume Up press at
