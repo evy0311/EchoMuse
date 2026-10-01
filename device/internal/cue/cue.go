@@ -49,33 +49,27 @@ const (
 	// other direction. 4ms is inaudible as a fade and completely removes it.
 	edgeMS = 4.0
 
-	// The volume cue is a low, struck chime rather than the wake cue's bright
-	// rising interval: it confirms a level change without saying "I'm
-	// listening". The pitch starts a little sharp and settles quickly onto A3,
-	// giving it the short "duhn" shape of a damped bell instead of a high
-	// electronic beep. A quiet E4 resonance and two overlapping reflections
-	// add a little tone and space without turning it into a repeated alert.
-	// 220Hz also sits in the range stock's speaker correction supports strongly
-	// on this small driver (#247).
+	// The volume cue is one compact electronic beep rather than the wake cue's
+	// bright rising interval: it confirms a level change without saying "I'm
+	// listening". Its E4/F4 pitch is an octave below the wake cue. A short level
+	// body establishes the beep, then the same note decays for a fraction of a
+	// second — noticeable, but without a separate echo or second stage. The
+	// fundamental deliberately dominates; the small-speaker output otherwise
+	// makes upper harmonics sound much brighter than the same preview on a Mac.
 	//
 	// Its peak is scaled by the device volume passed to VolumeCue, so it is
 	// useful as an audible preview of that level rather than a fixed alert.
-	volumeHz        = 220.0 // A3
-	volumeStartRise = 0.28  // begin 28% sharp, then settle onto volumeHz
-	volumeBodyMS    = 145.0
-	volumeEcho1MS   = 38.0
-	volumeEcho2MS   = 74.0
-	volumeEcho1Gain = 0.16
-	volumeEcho2Gain = 0.08
-	volumeRingRatio = 1.5 // E4: a restrained fifth above the A3 body
-	volumeRingGain  = 0.10
-	volumeMS        = volumeBodyMS + volumeEcho2MS
+	volumeHz        = 350.0
+	volumeHoldMS    = 36.0
+	volumeTailMS    = 125.0
+	volumeSecondMix = 0.03
+	volumeMS        = edgeMS + volumeHoldMS + volumeTailMS
 	// The cue bypasses EQ/output processing so its timbre is invariant, but
 	// follows the same VolumeGain curve as playback. This is the REAL rendered
-	// peak after the struck envelope, not merely its oscillator drive; keeping
-	// 0.5dB of headroom makes the loudest preview safe without leaving unused
-	// level in an already brief, low-frequency sound.
-	volumePeakDB = -0.5
+	// peak after the beep envelope, not merely its oscillator drive. A pure
+	// low tone has much higher sustained energy than typical programme audio;
+	// 3dB of headroom keeps the amplifier and small driver clean at maximum.
+	volumePeakDB = -3.0
 )
 
 // The wake sound's three levels, as set by `wakeSoundLevel`.
@@ -134,7 +128,7 @@ func VolumeCue(sampleRate int, volumeGain float64) []float64 {
 		volumeGain = 1
 	}
 	peak := math.Pow(10, volumePeakDB/20.0) * 32768.0 * volumeGain
-	return struckChime(float64(sampleRate), volumeHz, volumeMS, peak)
+	return decayBeep(float64(sampleRate), volumeHz, volumeHoldMS, volumeTailMS, volumeSecondMix, peak)
 }
 
 // VolumeButtonPreviewDue reports whether a physical button result merits a
@@ -146,76 +140,44 @@ func VolumeButtonPreviewDue(direction string, changed, atMax bool) bool {
 	return changed || (direction == "up" && atMax)
 }
 
-// struckChime renders the low, damped volume-button "duhn". Its pitch bend is
-// continuous (phase is accumulated sample by sample), so settling the note
-// cannot introduce the click a two-burst implementation would. A brief second
-// harmonic supplies the attack that lets a 220Hz fundamental read on this
-// speaker, while a quieter fifth and two overlapping reflections leave a
-// short, tonal ambience tail instead of an obvious second strike.
-func struckChime(fs, freq, ms, amp float64) []float64 {
-	n := int(fs * ms / 1000.0)
+// decayBeep renders a single-stage electronic volume-button tone. Its short
+// level body reads as a beep; the exponential release lets that same note hang
+// in the air briefly without producing a separate reflection or second note.
+func decayBeep(fs, freq, holdMS, tailMS, secondMix, amp float64) []float64 {
+	n := int(fs * (edgeMS + holdMS + tailMS) / 1000.0)
 	if n <= 0 {
 		return nil
 	}
-	bodyN := int(fs * volumeBodyMS / 1000.0)
-	if bodyN > n {
-		bodyN = n
-	}
 	edge := int(fs * edgeMS / 1000.0)
-	if edge*2 > bodyN {
-		edge = bodyN / 2
+	if edge*2 > n {
+		edge = n / 2
 	}
+	holdEnd := edge + int(fs*holdMS/1000.0)
 
 	out := make([]float64, n)
-	dry := make([]float64, bodyN)
-	phase := 0.0
-	for i := 0; i < bodyN; i++ {
-		x := float64(i) / float64(bodyN)
-		// The sharp attack settles during the first half of the note. Keeping
-		// the tail close to A3 is what makes it sound struck rather than swept.
-		instantHz := freq * (1 + volumeStartRise*math.Exp(-7*x))
-		phase += 2 * math.Pi * instantHz / fs
+	for i := range out {
+		t := float64(i) / fs
+		phase := 2 * math.Pi * freq * t
+		// A trace of the wake cue's second harmonic keeps its family resemblance,
+		// but the 350Hz fundamental owns the sound on the Echo's raw speaker path.
+		sample := math.Sin(phase) + secondMix*math.Sin(2*phase)
 
-		body := math.Sin(phase)
-		attack := 0.24 * math.Sin(2*phase) * math.Exp(-8*x)
-		// The fifth decays a little more slowly than the body, leaving a quiet
-		// pitched ring after the percussive attack has receded.
-		resonance := volumeRingGain * math.Sin(volumeRingRatio*phase+0.4) * math.Exp(-3*x)
-		decay := math.Exp(-4.8 * x)
-
-		// Raised-cosine edges always win over the decay, guaranteeing silence
-		// at both ends and no button-click discontinuity.
 		env := 1.0
 		if i < edge {
 			env = 0.5 * (1 - math.Cos(math.Pi*float64(i)/float64(edge)))
-		} else if i >= bodyN-edge {
-			k := float64(bodyN - 1 - i)
-			env = 0.5 * (1 - math.Cos(math.Pi*k/float64(edge)))
-		}
-
-		dry[i] = ((body+attack)*decay + resonance) * env
-	}
-
-	// These delays overlap the original strike, so they read as a small room
-	// around it rather than three separate button sounds.
-	for _, reflection := range []struct {
-		delayMS float64
-		gain    float64
-	}{
-		{0, 1},
-		{volumeEcho1MS, volumeEcho1Gain},
-		{volumeEcho2MS, volumeEcho2Gain},
-	} {
-		delay := int(fs * reflection.delayMS / 1000.0)
-		for i, sample := range dry {
-			if at := delay + i; at < len(out) {
-				out[at] += sample * reflection.gain
+		} else if i >= holdEnd {
+			tailX := float64(i-holdEnd) / float64(n-holdEnd)
+			env = math.Exp(-4.2 * tailX)
+			if i >= n-edge {
+				k := float64(n - 1 - i)
+				env *= 0.5 * (1 - math.Cos(math.Pi*k/float64(edge)))
 			}
 		}
+		out[i] = sample * env
 	}
 
-	// Normalise after the reflections are mixed: they change the waveform's
-	// crest factor, but must not change its promised maximum-volume peak.
+	// Normalise the rendered waveform, including its fullness components, to
+	// the promised maximum-volume peak.
 	rawPeak := 0.0
 	for _, sample := range out {
 		rawPeak = math.Max(rawPeak, math.Abs(sample))

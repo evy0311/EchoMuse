@@ -1106,16 +1106,16 @@ only when the button actually changes the level and both voice and music have
 been quiet for 100ms; HA/controller volume sets never play it. The cue mixer
 sits after software volume for the wake sound's sake, so `VolumeCue` receives
 `speaker.VolumeGain(newLevel)` and bakes that gain into its samples exactly
-once. The cue is a low, quickly damped A3 chime with a small downward settle,
-a quiet E4 resonance, and two overlapping reflections — the factory-like
-"duhn" requested in device testing with a subtle tonal ambience, not the first
-880Hz beep.
-Its rendered peak is normalised to -0.5dBFS at maximum volume; it still bypasses
-EQ and the output chain so its timbre never changes, while `VolumeGain` makes
-its level follow playback's 0.5dB-per-index law. An extra Volume Up press at
-the ceiling replays the max-level cue even though the level cannot change;
-Volume Down at the floor remains silent. Repeated button presses replace the
-in-flight cue instead of queueing.
+once. The cue is a single 350Hz electronic beep: a 36ms level body followed by
+a 125ms exponential release, with only 3% second harmonic so the fundamental
+remains dominant on the Echo's raw speaker path. Its rendered peak is
+normalised to -3dBFS at maximum volume; the extra headroom keeps the sustained
+low tone clean at the top of the range. It still bypasses EQ and the output
+chain so its timbre never changes, while `VolumeGain` makes its level follow
+playback's 0.5dB-per-index law. An extra Volume Up press at the ceiling replays
+the max-level cue even though the level cannot change; Volume Down at the floor
+remains silent. Repeated button presses replace the in-flight cue instead of
+queueing.
 The dashboard gates the setting on `volume_cue`, separate from `wake_cue`, so
 firmware that can play wake sounds but predates the volume behaviour is not
 offered a switch it will ignore.

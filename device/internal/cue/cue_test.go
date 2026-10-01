@@ -188,19 +188,19 @@ func TestVolumeButtonPreviewRepeatsAtMaximum(t *testing.T) {
 	}
 }
 
-func TestVolumeCueIsALowDampedChime(t *testing.T) {
+func TestVolumeCueIsASingleDecayingBeep(t *testing.T) {
 	c := VolumeCue(rate, 1)
 	wantLen := int(rate * volumeMS / 1000)
 	if len(c) != wantLen {
 		t.Fatalf("volume cue has %d samples, want %d", len(c), wantLen)
 	}
-	if volumeHz >= BingHz/2 {
-		t.Fatalf("volume cue %.0fHz is not materially below the %.0fHz wake cue", volumeHz, BingHz)
+	if volumeHz <= BingHz/2 || volumeHz >= BongHz/2 {
+		t.Fatalf("volume cue %.0fHz is not between the half-pitches of the wake cue", volumeHz)
 	}
 
-	// A struck note gives most of its energy to the attack and dies away. A
-	// flat electronic beep would have comparable RMS at both ends, while the
-	// quiet reflections intentionally leave more tail than the dry thud did.
+	// It begins as a definite beep, then the same note remains audible while
+	// decaying. A flat electronic alert would have comparable RMS throughout;
+	// a hard cutoff would have no measurable release window.
 	rms := func(x []float64) float64 {
 		var sum float64
 		for _, v := range x {
@@ -208,20 +208,13 @@ func TestVolumeCueIsALowDampedChime(t *testing.T) {
 		}
 		return math.Sqrt(sum / float64(len(x)))
 	}
-	third := len(c) / 3
-	attack := rms(c[:third])
-	tail := rms(c[len(c)-third:])
-	if attack < tail*2 {
-		t.Errorf("volume cue does not decay like a struck chime: attack RMS %.1f, tail %.1f", attack, tail)
+	window := func(startMS, endMS float64) []float64 {
+		return c[int(rate*startMS/1000):int(rate*endMS/1000)]
 	}
-
-	// The dry strike has ended by this point. There should still be a modest
-	// ambience tail, proving the reflections were rendered, but it must remain
-	// subordinate to the attack rather than sound like another button press.
-	dryEnd := int(rate * volumeBodyMS / 1000)
-	ambience := rms(c[dryEnd:])
-	if ambience < attack*0.01 || ambience > attack*0.25 {
-		t.Errorf("volume cue ambience RMS %.1f is not subtle relative to attack %.1f", ambience, attack)
+	body := rms(window(10, 35))
+	release := rms(window(75, 120))
+	if release < body*0.08 || release > body*0.4 {
+		t.Errorf("volume cue release RMS %.1f is not a short, audible decay from body %.1f", release, body)
 	}
 	for i, v := range c {
 		if v > math.MaxInt16 || v < math.MinInt16 {

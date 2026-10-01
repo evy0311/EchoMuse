@@ -9358,7 +9358,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             <div style={{ marginTop: 8, ...inputStyle }}>
               <Toggle label="Volume button sound"
                 sub={volumeCueCapable
-                  ? 'plays a low chime with a subtle resonant tail when idle; repeats at maximum'
+                  ? 'plays a short, low beep with a quick decay when idle; repeats at maximum'
                   : 'needs newer firmware on this Echo'}
                 disabled={!volumeCueCapable}
                 value={config.volumeButtonSound ?? true}
