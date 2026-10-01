@@ -218,8 +218,9 @@ spans that same range, so a press always moves it.
 **Volume button sound** plays a short, low chime at the newly selected volume when
 you change it with the Dot's physical buttons while the speaker is idle. It
 stays silent for Home Assistant volume changes and while voice or music is
-already playing. The switch follows the Playback section's Fleet / Device
-scope and is on by default.
+already playing. Pressing Volume Up again at maximum replays the chime so the
+upper limit is audible. The switch follows the Playback section's Fleet /
+Device scope and is on by default.
 
 Mute is remembered too, but by the device itself: a muted Dot stays muted
 through reboots, power cuts, and firmware updates — red ring and all —

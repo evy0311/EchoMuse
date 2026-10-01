@@ -209,6 +209,13 @@ func (s *Server) VolumeLevel() int {
 	return s.volume.Get()
 }
 
+// VolumeAtMax reports whether a further physical Volume Up press is pinned at
+// the top of the supported clean-output range. The button handler uses it to
+// replay the preview cue even though the numeric level cannot change.
+func (s *Server) VolumeAtMax() bool {
+	return s.volume.Get() >= volumeMax
+}
+
 // SetVolumeApply wires what applies the volume to the audio (the speaker's
 // software volume) and applies the current level immediately.
 func (s *Server) SetVolumeApply(fn func(level int)) {

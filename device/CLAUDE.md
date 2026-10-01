@@ -1108,10 +1108,12 @@ sits after software volume for the wake sound's sake, so `VolumeCue` receives
 `speaker.VolumeGain(newLevel)` and bakes that gain into its samples exactly
 once. The cue is a low, quickly damped A3 chime with a small downward settle —
 the factory-like "duhn" requested in device testing, not the first 880Hz beep.
-Its -2dBFS reference is 4dB above the first low-chime audition (one button
-step); it still bypasses EQ and the output chain so its timbre never changes,
-while `VolumeGain` makes its level follow playback's 0.5dB-per-index law.
-Repeated button presses replace the in-flight cue instead of queueing.
+Its rendered peak is normalised to -0.5dBFS at maximum volume; it still bypasses
+EQ and the output chain so its timbre never changes, while `VolumeGain` makes
+its level follow playback's 0.5dB-per-index law. An extra Volume Up press at
+the ceiling replays the max-level cue even though the level cannot change;
+Volume Down at the floor remains silent. Repeated button presses replace the
+in-flight cue instead of queueing.
 The dashboard gates the setting on `volume_cue`, separate from `wake_cue`, so
 firmware that can play wake sounds but predates the volume behaviour is not
 offered a switch it will ignore.

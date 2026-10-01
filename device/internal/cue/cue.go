@@ -62,10 +62,11 @@ const (
 	volumeStartRise = 0.28  // begin 28% sharp, then settle onto volumeHz
 	volumeMS        = 145.0
 	// The cue bypasses EQ/output processing so its timbre is invariant, but
-	// follows the same VolumeGain curve as playback. -2dBFS is a 4dB lift over
-	// the first audition — exactly one physical-button step — to put the short,
-	// low-decay sound closer to the perceived level of ordinary programme audio.
-	volumePeakDB = -2.0
+	// follows the same VolumeGain curve as playback. This is the REAL rendered
+	// peak after the struck envelope, not merely its oscillator drive; keeping
+	// 0.5dB of headroom makes the loudest preview safe without leaving unused
+	// level in an already brief, low-frequency sound.
+	volumePeakDB = -0.5
 )
 
 // The wake sound's three levels, as set by `wakeSoundLevel`.
@@ -127,6 +128,15 @@ func VolumeCue(sampleRate int, volumeGain float64) []float64 {
 	return struckChime(float64(sampleRate), volumeHz, volumeMS, peak)
 }
 
+// VolumeButtonPreviewDue reports whether a physical button result merits a
+// cue. Ordinary changes do; an unchanged Volume Up at the ceiling does too,
+// so repeated presses still tell the person that the device is already at
+// maximum. Volume Down at the floor remains silent because only the upper
+// boundary was requested as an audible limit indication.
+func VolumeButtonPreviewDue(direction string, changed, atMax bool) bool {
+	return changed || (direction == "up" && atMax)
+}
+
 // struckChime renders the low, damped volume-button "duhn". Its pitch bend is
 // continuous (phase is accumulated sample by sample), so settling the note
 // cannot introduce the click a two-burst implementation would. A brief second
@@ -144,6 +154,7 @@ func struckChime(fs, freq, ms, amp float64) []float64 {
 
 	out := make([]float64, n)
 	phase := 0.0
+	rawPeak := 0.0
 	for i := 0; i < n; i++ {
 		x := float64(i) / float64(n)
 		// The sharp attack settles during the first half of the note. Keeping
@@ -165,7 +176,14 @@ func struckChime(fs, freq, ms, amp float64) []float64 {
 			env = 0.5 * (1 - math.Cos(math.Pi*k/float64(edge)))
 		}
 
-		out[i] = amp * (body + attack) * decay * env / 1.24
+		out[i] = (body + attack) * decay * env
+		rawPeak = math.Max(rawPeak, math.Abs(out[i]))
+	}
+	if rawPeak > 0 {
+		scale := amp / rawPeak
+		for i := range out {
+			out[i] *= scale
+		}
 	}
 	return out
 }

@@ -158,6 +158,34 @@ func TestVolumeCueTracksTheSelectedVolume(t *testing.T) {
 	if got := VolumeCue(rate, 0); got != nil {
 		t.Errorf("zero volume rendered %d samples, want silence", len(got))
 	}
+	wantPeak := math.Pow(10, volumePeakDB/20.0) * 32768.0
+	if got := peak(full); math.Abs(got-wantPeak) > 0.01 {
+		t.Errorf("full-volume peak = %.2f, want %.2f (%.1fdBFS)", got, wantPeak, volumePeakDB)
+	}
+}
+
+func TestVolumeButtonPreviewRepeatsAtMaximum(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		direction string
+		changed   bool
+		atMax     bool
+		want      bool
+	}{
+		{"ordinary up", "up", true, false, true},
+		{"ordinary down", "down", true, false, true},
+		{"up again at maximum", "up", false, true, true},
+		{"unchanged up below maximum", "up", false, false, false},
+		{"down at lower boundary", "down", false, false, false},
+		{"down while at maximum", "down", false, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := VolumeButtonPreviewDue(tc.direction, tc.changed, tc.atMax); got != tc.want {
+				t.Errorf("VolumeButtonPreviewDue(%q, %v, %v) = %v, want %v",
+					tc.direction, tc.changed, tc.atMax, got, tc.want)
+			}
+		})
+	}
 }
 
 func TestVolumeCueIsALowDampedChime(t *testing.T) {

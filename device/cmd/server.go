@@ -155,7 +155,8 @@ func main() {
 		// volume changes stay silent, and active voice/music already provides
 		// the audible reference this setting exists to supply while idle.
 		const playbackTail = 100 * time.Millisecond
-		if changed && config.Get().VolumeButtonSoundEnabled() &&
+		if cue.VolumeButtonPreviewDue(direction, changed, s.VolumeAtMax()) &&
+			config.Get().VolumeButtonSoundEnabled() &&
 			!pcmSpeaker.VoiceAudible(playbackTail) &&
 			!pcmSpeaker.MusicAudible(playbackTail) {
 			playVolumeCue(pcmSpeaker, s.VolumeLevel())
