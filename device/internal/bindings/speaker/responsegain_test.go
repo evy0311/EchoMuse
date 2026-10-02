@@ -7,15 +7,15 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/outchain"
 )
 
-func settledVolume(level int) softVolume {
-	var volume softVolume
+func settledVolume(level int) *softVolume {
+	volume := &softVolume{}
 	volume.set(VolumeGain(level))
 	volume.settle()
 	return volume
 }
 
-func settledResponse(db float64, volume *softVolume) responseGain {
-	var response responseGain
+func settledResponse(db float64, volume *softVolume) *responseGain {
+	response := &responseGain{}
 	response.setDB(db)
 	response.settle(volume)
 	return response
@@ -50,8 +50,8 @@ func TestResponseGainLevels(t *testing.T) {
 
 func TestLowResponseLevelUsesHistoricalPath(t *testing.T) {
 	volume := settledVolume(87)
-	response := settledResponse(0, &volume)
-	responsePeriod := response.begin(&volume, 8)
+	response := settledResponse(0, volume)
+	responsePeriod := response.begin(volume, 8)
 	gains := make([]float64, 8)
 	responsePeriod.fillGains(gains)
 	if responsePeriod.boosted(gains) {
@@ -66,8 +66,8 @@ func TestLowResponseLevelUsesHistoricalPath(t *testing.T) {
 
 func TestResponseGainIsAppliedBeforeMix(t *testing.T) {
 	volume := settledVolume(87)
-	response := settledResponse(12, &volume)
-	responsePeriod := response.begin(&volume, 8)
+	response := settledResponse(12, volume)
+	responsePeriod := response.begin(volume, 8)
 	gains := make([]float64, 8)
 	responsePeriod.fillGains(gains)
 	var mixer Mixer
@@ -83,8 +83,8 @@ func TestResponseGainIsAppliedBeforeMix(t *testing.T) {
 
 func TestResponseGainIsRelativeToDeviceVolume(t *testing.T) {
 	volume := settledVolume(87) // -20dB = 0.1
-	response := settledResponse(12, &volume)
-	buf := renderResponse(period(8, 4000), nil, &response, &volume, nil)
+	response := settledResponse(12, volume)
+	buf := renderResponse(period(8, 4000), nil, response, volume, nil)
 	got := sampleAt(buf, 7, 0)
 	want := int16(1592) // 4000 * 10^(12/20) * 0.1
 	if got < want-2 || got > want+2 {
@@ -94,8 +94,8 @@ func TestResponseGainIsRelativeToDeviceVolume(t *testing.T) {
 
 func TestHotVoiceDoesNotClipBeforeDeviceVolume(t *testing.T) {
 	volume := settledVolume(47) // -40dB = 0.01
-	response := settledResponse(12, &volume)
-	buf := renderResponse(period(8, 30000), nil, &response, &volume, nil)
+	response := settledResponse(12, volume)
+	buf := renderResponse(period(8, 30000), nil, response, volume, nil)
 	got := sampleAt(buf, 7, 0)
 	want := int16(1194) // no intermediate 32767 saturation
 	if got < want-2 || got > want+2 {
@@ -114,8 +114,8 @@ func TestOutputChainCannotCancelResponseBoost(t *testing.T) {
 	highChain := outchain.New(48000)
 	highChain.SetActive(true)
 	highVolume := settledVolume(87)
-	highResponse := settledResponse(12, &highVolume)
-	highBuf := renderResponse(period(512, 30000), nil, &highResponse, &highVolume, highChain)
+	highResponse := settledResponse(12, highVolume)
+	highBuf := renderResponse(period(512, 30000), nil, highResponse, highVolume, highChain)
 
 	low := float64(sampleAt(lowBuf, 511, 0))
 	high := float64(sampleAt(highBuf, 511, 0))
@@ -127,8 +127,8 @@ func TestOutputChainCannotCancelResponseBoost(t *testing.T) {
 func TestResponseGainShrinksNearMaximumVolume(t *testing.T) {
 	for _, level := range []int{115, 121, 127} {
 		volume := settledVolume(level)
-		response := settledResponse(12, &volume)
-		buf := renderResponse(period(8, 4000), nil, &response, &volume, nil)
+		response := settledResponse(12, volume)
+		buf := renderResponse(period(8, 4000), nil, response, volume, nil)
 		if got := sampleAt(buf, 7, 0); got < 3998 || got > 4002 {
 			t.Errorf("level %d: combined gain got sample %d, want 4000", level, got)
 		}
@@ -137,9 +137,9 @@ func TestResponseGainShrinksNearMaximumVolume(t *testing.T) {
 
 func TestResponseGainCapsWhileVolumeRamps(t *testing.T) {
 	volume := settledVolume(87)
-	response := settledResponse(12, &volume)
+	response := settledResponse(12, volume)
 	volume.set(1) // volume-up during a response
-	buf := renderResponse(period(128, 4000), nil, &response, &volume, nil)
+	buf := renderResponse(period(128, 4000), nil, response, volume, nil)
 	for i := 0; i < 128; i++ {
 		if got := sampleAt(buf, i, 0); got > 4002 {
 			t.Fatalf("frame %d exceeded unity combined gain: %d", i, got)
@@ -153,8 +153,8 @@ func TestMusicKeepsDeviceVolumeUnderBoostedVoice(t *testing.T) {
 	plainVolume.apply(plain)
 
 	volume := settledVolume(87)
-	response := settledResponse(12, &volume)
-	got := renderResponse(period(32, 0), period(32, 4000), &response, &volume, nil)
+	response := settledResponse(12, volume)
+	got := renderResponse(period(32, 0), period(32, 4000), response, volume, nil)
 	for i := 0; i < 32; i++ {
 		actual, want := sampleAt(got, i, 0), sampleAt(plain, i, 0)
 		if actual < want-1 || actual > want+1 {
