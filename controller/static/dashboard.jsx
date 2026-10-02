@@ -1115,6 +1115,89 @@ function turnSegments(t) {
   return { listen, transcribe, respond, shown: listen + transcribe + respond };
 }
 
+function WakeSampleReview({ deviceId, isAdmin }) {
+  const [samples, setSamples] = useState([]);
+  const [playing, setPlaying] = useState(null);
+  const audioRef = useRef(null);
+  const urlsRef = useRef({});
+  const mono = "'DM Mono',monospace";
+
+  const load = async () => {
+    if (!isAdmin) return;
+    try { setSamples(await API.get(`/api/devices/${deviceId}/wake-samples?limit=50`) || []); }
+    catch {}
+  };
+  useEffect(() => {
+    load();
+    const timer = setInterval(load, 5000);
+    return () => {
+      clearInterval(timer);
+      if (audioRef.current) audioRef.current.pause();
+      Object.values(urlsRef.current).forEach(URL.revokeObjectURL);
+      urlsRef.current = {};
+    };
+  }, [deviceId, isAdmin]);
+
+  const sampleUrl = async sample => {
+    if (urlsRef.current[sample.id]) return urlsRef.current[sample.id];
+    try {
+      const url = URL.createObjectURL(await API.blob(
+        `/api/devices/${deviceId}/wake-samples/${sample.id}/audio`));
+      urlsRef.current[sample.id] = url;
+      return url;
+    } catch { return null; }
+  };
+  const play = async sample => {
+    if (audioRef.current) audioRef.current.pause();
+    if (playing === sample.id) { audioRef.current = null; setPlaying(null); return; }
+    const url = await sampleUrl(sample);
+    if (!url) return;
+    const audio = new Audio(url);
+    audioRef.current = audio;
+    audio.onended = audio.onerror = () => setPlaying(p => p === sample.id ? null : p);
+    setPlaying(sample.id);
+    audio.play().catch(() => setPlaying(null));
+  };
+  const label = async (sample, value) => {
+    try {
+      await API.patch(`/api/devices/${deviceId}/wake-samples/${sample.id}`, { label: value });
+      setSamples(rows => rows.map(row => row.id === sample.id ? { ...row, label: value } : row));
+    } catch {}
+  };
+  const remove = async sample => {
+    if (!window.confirm('Delete this saved wake sample?')) return;
+    try {
+      await API.del(`/api/devices/${deviceId}/wake-samples/${sample.id}`);
+      setSamples(rows => rows.filter(row => row.id !== sample.id));
+      if (urlsRef.current[sample.id]) URL.revokeObjectURL(urlsRef.current[sample.id]);
+      delete urlsRef.current[sample.id];
+    } catch {}
+  };
+  const download = async sample => {
+    const url = await sampleUrl(sample);
+    if (!url) return;
+    const a = document.createElement('a'); a.href = url;
+    a.download = `wake-sample-${sample.id}.wav`; a.click();
+  };
+
+  if (!isAdmin || !samples.length) return null;
+  return <div style={{ marginTop: 16, borderTop: '1px solid var(--track)', paddingTop: 12 }}>
+    <div className="em-label" style={{ marginBottom: 8 }}>Wake-word samples · newest 50</div>
+    <div style={{ maxHeight: 220, overflowY: 'auto' }}>
+      {samples.map(sample => <div key={sample.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 2px', borderBottom: '1px solid var(--hairline)', fontFamily: mono, fontSize: 10 }}>
+        <span style={{ color: 'var(--muted)', width: 72, flexShrink: 0 }}>{new Date(sample.ts * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
+        <button onClick={() => play(sample)} title="Play wake sample" style={{ background: 'none', border: 0, color: 'var(--text2)', cursor: 'pointer' }}>{playing === sample.id ? '▮' : '▶'}</button>
+        <span style={{ flex: 1, color: 'var(--text2)' }}>{sample.kind}{sample.score != null ? ` · controller ${sample.score.toFixed(3)}` : ''}{sample.threshold != null ? ` / ${sample.threshold.toFixed(2)}` : ''}{sample.device_score != null ? ` · Echo ${sample.device_score.toFixed(3)}` : ''}{sample.trigger_source ? ` · ${sample.trigger_source}` : ''}</span>
+        <select value={sample.label} onChange={e => label(sample, e.target.value)} aria-label="Wake sample label" style={{ fontSize: 10, maxWidth: 105 }}>
+          <option value="unreviewed">Review…</option><option value="wake">Wake word</option><option value="not_wake">Not wake word</option><option value="uncertain">Unsure</option>
+        </select>
+        <button onClick={() => download(sample)} title="Download WAV" style={{ background: 'none', border: 0, color: 'var(--muted)', cursor: 'pointer' }}>⤓</button>
+        <button onClick={() => remove(sample)} title="Delete sample" style={{ background: 'none', border: 0, color: 'var(--muted)', cursor: 'pointer' }}>×</button>
+      </div>)}
+    </div>
+  </div>;
+}
+
 function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMisses, stateLabel, stateColor, isAdmin }) {
   const [hover, setHover] = useState(null); // index into `recent`
   const mono = "'DM Mono',monospace";
@@ -1289,6 +1372,7 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
           })()}
         </div>
       )}
+      <WakeSampleReview deviceId={deviceId} isAdmin={isAdmin}/>
     </div>
   );
 }
@@ -8926,7 +9010,7 @@ const STAGE_MONO = "'DM Mono',monospace";
 // be silently wrong.
 const CONFIG_SECTIONS = {
   "playback": ["eqBands", "eqLoudness", "duckDb", "limiterEnabled", "limiterThreshold", "limiterRelease", "bassGuardEnabled", "bassGuardDb", "streamReply", "volumeButtonSound"],
-  "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice", "wakeSound", "wakeSoundLevel"],
+  "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice", "wakeSound", "wakeSoundLevel", "wakeClipCapture", "wakeClipMinScore"],
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "aecRefSource", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
   "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs", "consolePassword", "consoleTimeoutMin", "controllerEndpoints"],
@@ -9010,7 +9094,7 @@ function ScopeToggle({ local, onChange, disabled }) {
   );
 }
 
-function Stage({ n, title, chips, desc, children, scope, dim }) {
+function Stage({ n, title, chips, desc, children, scope, dim, after }) {
   return (
     <Panel>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 6, flexWrap: 'wrap' }}>
@@ -9024,6 +9108,9 @@ function Stage({ n, title, chips, desc, children, scope, dim }) {
       {/* dim: a section following the fleet is shown read-only rather than
           hidden, so you can still see what it is inheriting. */}
       <div style={dim}>{children}</div>
+      {/* after: per-device actions that are not config, so a fleet scope
+          that makes the section read-only must not lock them out. */}
+      {after}
     </Panel>
   );
 }
@@ -9459,6 +9546,15 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                 <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)' }}>Eager</span>
               </div>
               <Slider label="Arbitration window" sub="ms that the first Echo to hear you silences the others — no added delay; 0 disables" value={config.wakeArbitrationMs ?? 700} min={0} max={2000} step={50} unit="ms" onChange={v => set('wakeArbitrationMs', v)}/>
+              <Toggle label="Save wake-word samples"
+                sub={onDeviceMode(config) === 'off'
+                  ? 'saves clips for review in Activity'
+                  : "only works with wake word detection On the controller"}
+                disabled={onDeviceMode(config) !== 'off'}
+                value={config.wakeClipCapture ?? false} onChange={v => set('wakeClipCapture', v)}/>
+              <Slider label="Minimum sample score" sub="lower catches more near-misses, but more ordinary speech too"
+                disabled={onDeviceMode(config) !== 'off'}
+                value={config.wakeClipMinScore ?? 0.20} min={0.05} max={0.95} step={0.01} formatValue={v => v.toFixed(2)} onChange={v => set('wakeClipMinScore', v)}/>
               {/* Accessibility first: the ring is the only other sign the Echo
                   is listening. Disabled with the reason on firmware that cannot
                   play it, never a switch that saves and stays silent. */}
@@ -9755,7 +9851,8 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
       <Stage n="07" title="Sendspin"
         chips={<ScopeChip tone="device">Device</ScopeChip>}
         desc="Makes the Echo a Sendspin player, so Music Assistant can group it with other speakers and play to all of them in sync. Music Assistant connects to the Echo directly. Music from Home Assistant still takes priority and leaves the group. Early Access."
-        scope={scopeEl('sendspin')} dim={secStyle('sendspin')}>
+        scope={scopeEl('sendspin')} dim={secStyle('sendspin')}
+        after={(config.sendspinEnabled ?? false) ? sendspinPanel : null}>
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
           <Toggle label="Sendspin player"
             sub={sendspinCapable ? 'Music Assistant finds it on the network' : 'needs newer firmware on this Echo'}
@@ -9768,7 +9865,6 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             value={config.sendspinUnpaired ?? false}
             onChange={v => set('sendspinUnpaired', v)}/>
         </div>
-        {(config.sendspinEnabled ?? false) && sendspinPanel}
       </Stage>
     </div>
   );
