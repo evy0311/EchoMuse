@@ -509,7 +509,12 @@ func (p *PcmSpeaker) silenceLoop() {
 		var responseGains []float64
 		wideResponse := false
 		if hasResponse {
-			response = p.response.begin(&p.vol, len(voice)/4)
+			// One atomic read for the whole response period. Response gain is
+			// capped against this target and the same target is applied below,
+			// so a volume command arriving between those stages cannot briefly
+			// drive their product above unity.
+			volumeTarget := p.vol.targetGain()
+			response = p.response.begin(&p.vol, len(voice)/4, volumeTarget)
 			responseGains = p.responseGains[:len(voice)/4]
 			response.fillGains(responseGains)
 			wideResponse = response.boosted(responseGains)
@@ -533,7 +538,7 @@ func (p *PcmSpeaker) silenceLoop() {
 				log.Printf("[speaker] output chain: %s", applied)
 			}
 			out = voice
-			p.vol.applyFloat(wide, out)
+			p.vol.applyFloat(wide, out, response.volumeTarget)
 		} else {
 			out = p.mixer.Mix(voice, music, p.duckTarget.Load())
 			process := out != nil
