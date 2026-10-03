@@ -20,11 +20,12 @@ type responseGain struct {
 }
 
 type responsePeriod struct {
-	owner     *responseGain
-	volume    *softVolume
-	start     float64
-	requested float64
-	frames    int
+	owner        *responseGain
+	volume       *softVolume
+	volumeTarget float64
+	start        float64
+	requested    float64
+	frames       int
 }
 
 func gainFromDB(db float64) float64 {
@@ -56,26 +57,27 @@ func cappedResponseGain(requested, volume float64) float64 {
 	return requested
 }
 
-func (g *responseGain) begin(volume *softVolume, frames int) responsePeriod {
+func (g *responseGain) begin(volume *softVolume, frames int, volumeTarget float64) responsePeriod {
 	start := g.cur
 	if start == 0 {
 		start = 1
 	}
 	return responsePeriod{
-		owner:     g,
-		volume:    volume,
-		start:     start,
-		requested: g.requested(),
-		frames:    frames,
+		owner:        g,
+		volume:       volume,
+		volumeTarget: volumeTarget,
+		start:        start,
+		requested:    g.requested(),
+		frames:       frames,
 	}
 }
 
 func (p responsePeriod) gainAtFrame(frame int) float64 {
 	if p.frames <= 0 {
-		return cappedResponseGain(p.requested, p.volume.targetGain())
+		return cappedResponseGain(p.requested, p.volumeTarget)
 	}
 	candidate := p.start + (p.requested-p.start)*float64(frame+1)/float64(p.frames)
-	volume := p.volume.gainAtFrame(frame, p.frames, p.volume.targetGain())
+	volume := p.volume.gainAtFrame(frame, p.frames, p.volumeTarget)
 	return cappedResponseGain(candidate, volume)
 }
 

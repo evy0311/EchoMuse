@@ -81,10 +81,12 @@ func (v *softVolume) apply(buf []byte) {
 	v.cur = tgt
 }
 
-// applyFloat applies the user's volume to a wide-precision stereo mix and
-// quantises it to S16 only here, at the final PCM boundary.
-func (v *softVolume) applyFloat(in []float64, out []byte) {
-	tgt := v.targetGain()
+// applyFloat applies the period's snapshotted volume target to a
+// wide-precision stereo mix and quantises it to S16 only here, at the final
+// PCM boundary. The caller passes the same target used to cap response gain,
+// so a concurrent control-plane update cannot make their product exceed
+// unity during this period.
+func (v *softVolume) applyFloat(in []float64, out []byte, tgt float64) {
 	frames := min(len(in)/2, len(out)/4)
 	if frames == 0 {
 		v.cur = tgt
