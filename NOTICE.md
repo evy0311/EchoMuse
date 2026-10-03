@@ -44,6 +44,8 @@ Listed because they end up in the published container image:
 
 - **ONNX Runtime** (MIT) — wake word inference, controller and device.
 - **openWakeWord** (Apache-2.0) — wake word models and feature pipeline.
+- **YAMNet** (Apache-2.0, Google/TensorFlow authors) — optional on-device
+  hazardous-sound classifier and AudioSet class map, installed out of band.
 - **DTLN** (MIT, Nils L. Westhausen) — the two pretrained noise-suppression
   models the controller image downloads at build time, pinned to a commit in
   `controller/Dockerfile`. Baked into the published image, so they are

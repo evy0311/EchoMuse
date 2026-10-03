@@ -423,6 +423,7 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/devices/{id}/logs",          _get_device_logs)
     app.router.add_get("/api/devices/{id}/turns",         _get_device_turns)
     app.router.add_get("/api/devices/{id}/activity",      _get_device_activity)
+    app.router.add_get("/api/devices/{id}/sound-events",  _get_sound_events)
     app.router.add_get("/api/devices/{id}/turns/{turn}/audio", _get_turn_audio)
     app.router.add_get("/api/devices/{id}/wake-samples", _get_wake_samples)
     app.router.add_patch("/api/devices/{id}/wake-samples/{sample}", _patch_wake_sample)
@@ -992,6 +993,10 @@ async def _get_device_activity(request: web.Request) -> web.Response:
         None, lambda: db.get_device_metrics(device_id, since)
     )
 
+    sound_events = await loop.run_in_executor(
+        None, lambda: db.get_sound_events(device_id, 1000, since)
+    )
+
     def pct(sorted_vals, p):
         if not sorted_vals:
             return None
@@ -1115,7 +1120,21 @@ async def _get_device_activity(request: web.Request) -> web.Response:
         "wake_counters": [dict(r) for r in counters],
         "metrics":       metrics,
         "shadow":        shadow_out,
+        "sound_events":  sound_events,
     })
+
+
+@auth.require_auth
+async def _get_sound_events(request: web.Request) -> web.Response:
+    """GET /api/devices/{id}/sound-events — recent local detections."""
+    device_id = request.match_info["id"]
+    try:
+        limit = min(int(request.query.get("limit", 200)), 1000)
+    except ValueError:
+        return _error("bad_request", "limit must be an integer", 400)
+    events = await asyncio.get_event_loop().run_in_executor(
+        None, db.get_sound_events, device_id, limit)
+    return _ok(events)
 
 
 @auth.require_admin
@@ -6562,6 +6581,7 @@ def _merge_device(row, boot: dict | None = None) -> dict:
         "listen":          _listen_json(live) if live else None,
         "wakeCueCapable": getattr(live, "wake_cue_capable", False) if live else False,
         "volumeCueCapable": getattr(live, "volume_cue_capable", False) if live else False,
+        "soundEventsCapable": getattr(live, "sound_events_capable", False) if live else False,
         # Sendspin player (#89): whether the firmware has one, and its status
         # (no secrets; the pairing token is its own request).
         "sendspinCapable": getattr(live, "sendspin_capable", False) if live else False,

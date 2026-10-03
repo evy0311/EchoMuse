@@ -37,6 +37,13 @@ SECTIONS: dict[str, dict] = {
             "wakeClipCapture", "wakeClipMinScore",
         ],
     },
+    "sound_detection": {
+        "label": "Sound detection",
+        "keys": [
+            "soundDetection", "soundDetectionThreshold",
+            "soundDetectionConfirmations", "soundDetectionCooldownSec",
+        ],
+    },
     "microphones": {
         "label": "Microphones",
         "keys": [

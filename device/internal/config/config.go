@@ -74,6 +74,14 @@ type Device struct {
 	// scored controller-side over the turn's own audio.
 	OwwOnDevice string
 
+	// Hazardous-sound analysis is separate from wake-word scoring but follows
+	// the same off/shadow/on lifecycle. Off is the compatibility default and
+	// does not load the model.
+	SoundDetection              string
+	SoundDetectionThreshold     float64
+	SoundDetectionConfirmations int
+	SoundDetectionCooldownSec   int
+
 	// ADC gain — applied via tinymix when config is pushed
 	AdcDigitalGain int
 	AdcMicpga      int
@@ -191,6 +199,10 @@ func (d *Device) loadDefaults() {
 	d.OwwThreshold = envFloat("OWW_THRESHOLD", 0.5)
 	d.OwwModel = envStr("OWW_MODEL", "hey_jarvis_v0.1")
 	d.OwwOnDevice = normaliseOnDevice(envStr("OWW_ON_DEVICE", OnDeviceOff))
+	d.SoundDetection = normaliseSoundDetection(envStr("SOUND_DETECTION", OnDeviceOff))
+	d.SoundDetectionThreshold = envFloat("SOUND_DETECTION_THRESHOLD", 0.5)
+	d.SoundDetectionConfirmations = envInt("SOUND_DETECTION_CONFIRMATIONS", 2)
+	d.SoundDetectionCooldownSec = envInt("SOUND_DETECTION_COOLDOWN_SEC", 60)
 	d.BargeInThreshold = envFloat("BARGE_IN_THRESHOLD", 0.05)
 	d.DuckDb = envFloat("DUCK_DB", -18)
 	d.WakeSound = envBool("WAKE_SOUND", false)
@@ -248,6 +260,18 @@ func (d *Device) Apply(msg ConfigMessage) {
 	}
 	if msg.OwwOnDevice != "" {
 		d.OwwOnDevice = normaliseOnDevice(msg.OwwOnDevice)
+	}
+	if msg.SoundDetection != "" {
+		d.SoundDetection = normaliseSoundDetection(msg.SoundDetection)
+	}
+	if msg.SoundDetectionThreshold > 0 && msg.SoundDetectionThreshold <= 1 {
+		d.SoundDetectionThreshold = msg.SoundDetectionThreshold
+	}
+	if msg.SoundDetectionConfirmations > 0 {
+		d.SoundDetectionConfirmations = msg.SoundDetectionConfirmations
+	}
+	if msg.SoundDetectionCooldownSec > 0 {
+		d.SoundDetectionCooldownSec = msg.SoundDetectionCooldownSec
 	}
 	if msg.BargeInEnabled != nil {
 		d.BargeInEnabled = *msg.BargeInEnabled
@@ -414,6 +438,12 @@ func (d *Device) Snapshot() ConfigMessage {
 		OwwThreshold:       d.OwwThreshold,
 		OwwModel:           d.OwwModel,
 		OwwOnDevice:        d.OwwOnDevice,
+
+		SoundDetection:              d.SoundDetection,
+		SoundDetectionThreshold:     d.SoundDetectionThreshold,
+		SoundDetectionConfirmations: d.SoundDetectionConfirmations,
+		SoundDetectionCooldownSec:   d.SoundDetectionCooldownSec,
+
 		BargeInEnabled:     &bargeInEnabled,
 		BargeInThreshold:   d.BargeInThreshold,
 		StartupVolume:      d.StartupVolume,
@@ -456,6 +486,12 @@ type ConfigMessage struct {
 	OwwThreshold   float64 `json:"owwThreshold,omitempty"`
 	OwwModel       string  `json:"owwModel,omitempty"`
 	OwwOnDevice    string  `json:"owwOnDevice,omitempty"`
+
+	SoundDetection              string  `json:"soundDetection,omitempty"`
+	SoundDetectionThreshold     float64 `json:"soundDetectionThreshold,omitempty"`
+	SoundDetectionConfirmations int     `json:"soundDetectionConfirmations,omitempty"`
+	SoundDetectionCooldownSec   int     `json:"soundDetectionCooldownSec,omitempty"`
+
 	// ConsolePassword is the hashed record emOS's init checks before handing
 	// over a shell on the USB serial console. A POINTER, and it has to be: an
 	// EMPTY record is the legitimate "no password" setting, so with a plain
@@ -564,6 +600,20 @@ func normaliseOnDevice(v string) string {
 		return OnDeviceOff
 	default:
 		log.Printf("[config] unknown owwOnDevice %q — treating as %q", v, OnDeviceOff)
+		return OnDeviceOff
+	}
+}
+
+func normaliseSoundDetection(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case OnDeviceShadow:
+		return OnDeviceShadow
+	case OnDeviceOn:
+		return OnDeviceOn
+	case "", OnDeviceOff:
+		return OnDeviceOff
+	default:
+		log.Printf("[config] unknown soundDetection %q — treating as %q", v, OnDeviceOff)
 		return OnDeviceOff
 	}
 }

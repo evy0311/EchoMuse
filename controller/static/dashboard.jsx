@@ -1198,6 +1198,53 @@ function WakeSampleReview({ deviceId, isAdmin }) {
   </div>;
 }
 
+const SOUND_EVENT_LABELS = {
+  smoke_alarm: 'Smoke alarm detected',
+  fire_alarm: 'Fire alarm detected',
+  possible_co_alarm: 'Possible carbon-monoxide alarm pattern',
+  glass_break: 'Possible glass break',
+  alarm_unknown: 'Unclassified alarm sound',
+};
+
+function SoundEventHistory({ events, deviceLabel }) {
+  const mono = "'DM Mono',monospace";
+  if (!events.length) return (
+    <div style={{ fontFamily:mono, fontSize:11, color:'var(--muted)' }}>
+      No sound detections recorded. Shadow-mode candidates will appear here too.
+    </div>
+  );
+  return <div style={{ maxHeight:280, overflowY:'auto' }}>
+    {events.map(e => (
+      <details key={`${e.boot_id}-${e.event_sequence}`}
+        style={{ borderBottom:'1px solid var(--hairline)', padding:'8px 0' }}>
+        <summary style={{ cursor:'pointer', display:'flex', gap:10, alignItems:'baseline', listStyle:'none' }}>
+          <span style={{ fontFamily:mono, fontSize:9, color:'var(--muted)', width:62, flexShrink:0 }}>
+            {new Date(e.ts * 1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}
+          </span>
+          <span style={{ fontFamily:"'DM Sans',sans-serif", fontSize:12, color:'var(--text)', flex:1 }}>
+            {SOUND_EVENT_LABELS[e.kind] || 'Sound detected'}
+          </span>
+          <span style={{ fontFamily:mono, fontSize:9, color:e.mode === 'shadow' ? 'var(--muted)' : 'var(--warn)' }}>
+            {e.mode === 'shadow' ? 'SHADOW' : 'ACTIVE'} · {(e.confidence * 100).toFixed(0)}%
+          </span>
+        </summary>
+        <div style={{ fontFamily:mono, fontSize:9, color:'var(--text2)', lineHeight:1.7, padding:'7px 0 2px 72px' }}>
+          {deviceLabel || e.device_id} · {e.confirmations} confirmation{e.confirmations === 1 ? '' : 's'}
+          {e.cadence && e.cadence !== 'unknown' ? ` · cadence ${e.cadence.toUpperCase()}` : ''}
+          {e.playback_active && <span style={{ color:'var(--warn)' }}> · playback was active</span>}
+          <br/>model {e.model || 'unknown'} · runtime {e.runtime || 'unknown'}
+          {Object.keys(e.scores || {}).length > 0 && <>
+            <br/>scores {Object.entries(e.scores).sort((a,b) => b[1]-a[1]).map(([k,v]) => `${k}: ${Number(v).toFixed(3)}`).join(' · ')}
+          </>}
+          {Object.keys(e.evidence || {}).length > 0 && <>
+            <br/>evidence {Object.entries(e.evidence).map(([k,v]) => `${k}: ${String(v)}`).join(' · ')}
+          </>}
+        </div>
+      </details>
+    ))}
+  </div>;
+}
+
 function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMisses, stateLabel, stateColor, isAdmin }) {
   const [hover, setHover] = useState(null); // index into `recent`
   const mono = "'DM Mono',monospace";
@@ -1597,6 +1644,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   const [assetResult, setAssetResult] = useState(null);
   const fileInputRef = useRef(null);
   const [turns, setTurns] = useState([]);
+  const [soundEvents, setSoundEvents] = useState([]);
   const state = deviceState(device);
   const needsUpdate = !!device.firmware_update;
 
@@ -1650,8 +1698,14 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   useEffect(() => {
     if (tab !== 'activity') return;
     let live = true;
-    const load = () => API.get(`/api/devices/${device.device_id}/turns`)
-      .then(t => { if (live) setTurns(Array.isArray(t) ? t : []); })
+    const load = () => Promise.all([
+      API.get(`/api/devices/${device.device_id}/turns`),
+      API.get(`/api/devices/${device.device_id}/sound-events`),
+    ])
+      .then(([t, s]) => { if (live) {
+        setTurns(Array.isArray(t) ? t : []);
+        setSoundEvents(Array.isArray(s) ? s : []);
+      }})
       .catch(() => {});
     load();
     const iv = setInterval(load, 10000);
@@ -2401,6 +2455,9 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     isAdmin={isAdmin}
                   />
                 </Panel>
+                <Panel label="Hazardous-sound detections" style={{ marginTop:16 }}>
+                  <SoundEventHistory events={soundEvents} deviceLabel={device.label}/>
+                </Panel>
               </div>
             );
           })()}
@@ -2456,6 +2513,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 listen={device.connected ? device.listen : null}
                 wakeCueCapable={!device.connected || !!device.wakeCueCapable}
                 volumeCueCapable={!device.connected || !!device.volumeCueCapable}
+                soundEventsCapable={!device.connected || !!device.soundEventsCapable}
                 sendspinCapable={!device.connected || !!device.sendspinCapable}
                 sendspinPanel={device.connected && device.sendspinCapable
                   ? <SendspinPairing deviceId={device.device_id} status={device.sendspin} isAdmin={isAdmin}/>
@@ -9200,6 +9258,7 @@ const STAGE_MONO = "'DM Mono',monospace";
 const CONFIG_SECTIONS = {
   "playback": ["eqBands", "eqLoudness", "duckDb", "limiterEnabled", "limiterThreshold", "limiterRelease", "bassGuardEnabled", "bassGuardDb", "streamReply", "volumeButtonSound"],
   "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice", "wakeSound", "wakeSoundLevel", "wakeClipCapture", "wakeClipMinScore"],
+  "sound_detection": ["soundDetection", "soundDetectionThreshold", "soundDetectionConfirmations", "soundDetectionCooldownSec"],
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "aecRefSource", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
   "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs", "consolePassword", "consoleTimeoutMin", "controllerEndpoints"],
@@ -9211,7 +9270,7 @@ const CONFIG_SECTIONS = {
 // that lets a write be gated by the section owning the key it touches.
 const SECTION_LABELS = {
   playback: 'Playback', wakeword: 'Wake word', microphones: 'Microphones',
-  ring: 'Ring', advanced: 'Advanced', bluetooth: 'Bluetooth', sendspin: 'Sendspin',
+  sound_detection: 'Sound detection', ring: 'Ring', advanced: 'Advanced', bluetooth: 'Bluetooth', sendspin: 'Sendspin',
 };
 const KEY_SECTION = {};
 Object.entries(CONFIG_SECTIONS).forEach(([sid, keys]) => {
@@ -9363,8 +9422,8 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                             localCapable = true, listen = null,
                             hwEchoRef = false, hwRefCapable = true,
                             emosFleet = true, wakeCueCapable = true,
-                            volumeCueCapable = true, sendspinCapable = true,
-                            sendspinPanel = null }) {
+                            volumeCueCapable = true, soundEventsCapable = true,
+                            sendspinCapable = true, sendspinPanel = null }) {
   // emosFleet defaults TRUE for the same reason the capability props above do,
   // and for one more: it gates the console password, which is emOS-only, and
   // disabling a setting because we do not KNOW the fleet has an emOS device
@@ -9805,8 +9864,47 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
         </div>
       </Stage>
 
-      {/* 03 MICROPHONES */}
-      <Stage n="03" title="Microphones"
+      {/* 03 SOUND DETECTION */}
+      <Stage n="03" title="Sound detection"
+        chips={<ScopeChip tone="device">Device</ScopeChip>}
+        desc="Local smoke/fire alarm and possible glass-break classification. Audio stays on the Echo; only confirmed candidates and periodic health are sent to this controller. Carbon-monoxide wording remains experimental and requires a matching T4 cadence."
+        scope={scopeEl('sound_detection')} dim={secStyle('sound_detection')}>
+        <div style={{ ...inputStyle, opacity: soundEventsCapable ? 1 : 0.55 }}>
+          <Select label="Detection mode"
+            sub={soundEventsCapable
+              ? 'Off loads no model; Diagnostic records candidates; On records confirmed detections'
+              : 'needs newer firmware on this Echo'}
+            disabled={!soundEventsCapable}
+            value={config.soundDetection ?? 'off'}
+            options={[
+              { value:'off', label:'Off' },
+              { value:'shadow', label:'Diagnostic (shadow)' },
+              { value:'on', label:'On' },
+            ]}
+            onChange={v => set('soundDetection', v)}/>
+          <Slider label="Detection threshold" sub="minimum target-class confidence before temporal confirmation"
+            disabled={!soundEventsCapable}
+            value={config.soundDetectionThreshold ?? 0.5} min={0.1} max={0.95} step={0.05}
+            formatValue={v => Number(v).toFixed(2)}
+            onChange={v => set('soundDetectionThreshold', v)}/>
+          <Slider label="Confirmations" sub="consecutive positive analysis windows required"
+            disabled={!soundEventsCapable}
+            value={config.soundDetectionConfirmations ?? 2} min={1} max={6} step={1}
+            onChange={v => set('soundDetectionConfirmations', v)}/>
+          <Slider label="Incident cooldown" sub="seconds before the same continuing sound may create another row"
+            disabled={!soundEventsCapable}
+            value={config.soundDetectionCooldownSec ?? 60} min={5} max={600} step={5} unit="s"
+            onChange={v => set('soundDetectionCooldownSec', v)}/>
+          {(config.soundDetection ?? 'off') !== 'off' && soundEventsCapable && (
+            <div className="em-label" style={{ color:'var(--muted)' }}>
+              Requires yamnet_classifier.onnx, yamnet_class_map.csv, and libonnxruntime.so under /data/local/share/echomuse/alarm/. Missing assets leave detection safely inactive.
+            </div>
+          )}
+        </div>
+      </Stage>
+
+      {/* 04 MICROPHONES */}
+      <Stage n="04" title="Microphones"
         chips={<ScopeChip tone="device">Device</ScopeChip>}
         desc="Capture from the 7-mic array. Presets steer which perimeter mic is used during voice turns — wake-word listening always uses the centre mic. Gain here is the only gain in the wake path: it sets the level everything downstream hears."
         scope={scopeEl('microphones')} dim={secStyle('microphones')}>
@@ -9884,7 +9982,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
       </Stage>
 
       {/* 04 RING */}
-      <Stage n="04" title="Ring"
+      <Stage n="05" title="Ring"
         chips={<ScopeChip tone="controller">Controller</ScopeChip>}
         desc="Colours for the LED ring during conversations — the solid listening ring and the thinking spinner. The red mute ring and cyan volume arc never change; red always means the mics are off."
         scope={scopeEl('ring')} dim={secStyle('ring')}>
@@ -9967,7 +10065,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
       </Stage>
 
       {/* 05 ADVANCED — button-turn internals: processing + speech gate */}
-      <Stage n="05" title="Advanced"
+      <Stage n="06" title="Advanced"
         chips={<><ScopeChip tone="device">Device</ScopeChip><ScopeChip>Button turns only</ScopeChip></>}
         desc="Everything here affects only bounded button-press turns — except the action button setting, which decides whether a tap starts one at all, and the USB console and controller address, which are not about turns. Wake-word turns stream continuously — Home Assistant's VAD endpoints them, and the controller closes accidental wakes after 5s of silence relative to the room's measured noise floor — so none of these settings touch the wake path."
         scope={scopeEl('advanced')} dim={secStyle('advanced')}>
@@ -10027,7 +10125,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
       </Stage>
 
       {/* 06 BLUETOOTH */}
-      <Stage n="06" title="Bluetooth"
+      <Stage n="07" title="Bluetooth"
         chips={<><ScopeChip tone="device">Device</ScopeChip><ScopeChip tone="controller">Controller</ScopeChip></>}
         desc="Turns the device into a Home Assistant Bluetooth proxy: it passively listens for BLE advertisements (presence beacons, temperature sensors) and forwards them to HA as a separate ESPHome device — independent of the voice assistant. Enabling permanently switches the Dot's Bluetooth chip away from Android's stack (Bluetooth speaker pairing, never used by EchoMuse, stops being possible)."
         scope={scopeEl('bluetooth')} dim={secStyle('bluetooth')}>
@@ -10037,7 +10135,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
       </Stage>
 
       {/* 07 SENDSPIN */}
-      <Stage n="07" title="Sendspin"
+      <Stage n="08" title="Sendspin"
         chips={<ScopeChip tone="device">Device</ScopeChip>}
         desc="Makes the Echo a Sendspin player, so Music Assistant can group it with other speakers and play to all of them in sync. Music Assistant connects to the Echo directly. Music from Home Assistant still takes priority and leaves the group. Early Access."
         scope={scopeEl('sendspin')} dim={secStyle('sendspin')}

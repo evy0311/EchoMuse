@@ -26,6 +26,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/discovery"
 	"github.com/wilbowes/EchoMuse/internal/platform"
+	"github.com/wilbowes/EchoMuse/internal/soundevent"
 	"github.com/wilbowes/EchoMuse/pkg/board"
 	"github.com/wilbowes/EchoMuse/pkg/buttons"
 	"github.com/wilbowes/EchoMuse/pkg/led"
@@ -1277,7 +1278,7 @@ func capabilities() []string {
 	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons",
 		"oww_shadow", "oww_trigger", "button_hold", "audio_mix",
 		"aec_hw_ref", "oww_local_only", "output_chain", "wake_cue", "volume_cue", "pairing",
-		"sendspin"}
+		"sendspin", "sound_events"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}
@@ -1417,6 +1418,23 @@ func (c *ControlClient) SendOwwShadowCross(score float32, ageMs int64) {
 		"type":  "oww_shadow_cross",
 		"score": score,
 		"ageMs": ageMs,
+	})
+}
+
+// SendSoundEvent reports one temporally confirmed hazardous-sound candidate.
+// These messages are rare and compact; continuous scores remain on-device and
+// only their health summary rides the periodic stats message.
+func (c *ControlClient) SendSoundEvent(e soundevent.Event) {
+	ageMs := time.Since(e.CapturedAt).Milliseconds()
+	if ageMs < 0 {
+		ageMs = 0
+	}
+	_ = c.writeJSON(map[string]interface{}{
+		"type": "sound_event", "kind": e.Kind, "confidence": e.Confidence,
+		"scores": e.Scores, "mode": e.Mode, "confirmations": e.Confirmations,
+		"cadence": e.Cadence, "evidence": e.Evidence,
+		"playbackActive": e.Playback, "ageMs": ageMs, "sequence": e.Sequence,
+		"model": e.Model, "runtime": e.Runtime,
 	})
 }
 

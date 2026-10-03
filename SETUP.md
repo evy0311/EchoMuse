@@ -441,6 +441,27 @@ carries on with controller-side wake word. Costs ~38% of one core permanently
 on top of the ~18–20% mic-pipeline baseline, so **enable it one device at a
 time.**
 
+### On-device hazardous-sound detection (experimental)
+
+Hazardous-sound assets are separate from both firmware slots and wake-word
+assets. Install the neural-only YAMNet ONNX export as
+`/data/local/share/echomuse/alarm/yamnet_classifier.onnx`, the matching official
+`yamnet_class_map.csv`, and the same ARMv7 `libonnxruntime.so` used by the wake
+word runtime. Firmware computes the official YAMNet log-mel frontend in Go;
+the export must accept one `[1, 96, 64]` float32 patch and return 521 AudioSet
+scores. Startup checks the output width and resolves targets from the manifest
+rather than trusting numeric indices.
+
+Leave `soundDetection` set to `off` until `yamnet_probe` passes on the intended
+Echo. Then select **Diagnostic (shadow)** in Config → Sound detection. Shadow
+events appear in Activity and are explicitly labelled. Every confirmed
+incident in either `shadow` or `on` mode is also emitted through the device's
+Home Assistant **Hazardous Sound** event entity; its companion **Hazardous
+Sound Confidence** sensor is updated immediately before the event so an
+automation can choose its own action threshold. EchoMuse does not create MQTT
+messages, notifications, or emergency actions. Missing or incompatible assets
+leave detection inactive and do not affect capture, wake words, or voice turns.
+
 ---
 
 ## WebSocket Protocol

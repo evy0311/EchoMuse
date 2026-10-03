@@ -35,6 +35,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/listen"
 	"github.com/wilbowes/EchoMuse/internal/platform"
 	"github.com/wilbowes/EchoMuse/internal/server"
+	"github.com/wilbowes/EchoMuse/internal/soundevent"
 	"github.com/wilbowes/EchoMuse/internal/wakeword"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/shadow"
 	"github.com/wilbowes/EchoMuse/internal/wifi"
@@ -526,6 +527,7 @@ func main() {
 			st := collectStats()
 			st.Ble = bleScanner.Stats()
 			st.OwwShadow = shadowStats(dataClient)
+			st.SoundDetection = soundEventStats(dataClient)
 			st.AecRef = canceller.RefSource()
 			st.Sendspin = sendspinStatus()
 			controlClient.SendStats(st)
@@ -561,6 +563,7 @@ func main() {
 		applyBleConfig(bleScanner)
 		applySendspinConfig(pcmSpeaker, controlClient, s, deviceID)
 		applyShadowConfig(dataClient, controlClient, pcmSpeaker, s)
+		applySoundEventConfig(dataClient, controlClient, pcmSpeaker)
 		syncListenState(dataClient, controlClient, false)
 	})
 
@@ -769,6 +772,7 @@ func main() {
 			st := collectStats()
 			st.Ble = bleScanner.Stats()
 			st.OwwShadow = shadowStats(dataClient)
+			st.SoundDetection = soundEventStats(dataClient)
 			st.AecRef = canceller.RefSource()
 			var snaps []client.TCPSnap
 			if sn, ok := controlClient.TCPSnapshot(); ok {
@@ -851,6 +855,14 @@ func shadowStats(dc *client.DataClient) interface{} {
 		"maxInferMs": st.MaxInferMs,
 		"maxGapMs":   st.MaxGapMs,
 	}
+}
+
+func soundEventStats(dc *client.DataClient) interface{} {
+	d := dc.SoundDetector()
+	if d == nil {
+		return nil
+	}
+	return d.Drain()
 }
 
 // emmcForStats is the eMMC wear for the stats tick, read at most every six
@@ -1210,6 +1222,59 @@ var shadowState struct {
 	mode    string
 	model   string
 	lastErr string
+}
+
+var soundEventState struct {
+	mode    string
+	lastErr string
+}
+
+// applySoundEventConfig mirrors applyShadowConfig's lifecycle without sharing
+// an inference queue or model state. Mode/threshold/confirmation/cooldown
+// changes are live; the expensive runtime/model load happens only when moving
+// from off (or a failed load) to an enabled mode.
+func applySoundEventConfig(dc *client.DataClient, cc *client.ControlClient,
+	spk *speaker.PcmSpeaker) {
+	snap := config.Get().Snapshot()
+	cfg := soundevent.Config{
+		Mode: snap.SoundDetection, Threshold: float32(snap.SoundDetectionThreshold),
+		Confirmations: snap.SoundDetectionConfirmations,
+		Cooldown:      time.Duration(snap.SoundDetectionCooldownSec) * time.Second,
+	}
+	if cfg.Mode == soundevent.ModeOff {
+		if dc.SoundDetector() != nil {
+			dc.SetSoundDetector(nil)
+			log.Printf("[soundevent] detection disabled")
+		}
+		soundEventState.mode, soundEventState.lastErr = cfg.Mode, ""
+		return
+	}
+	if d := dc.SoundDetector(); d != nil {
+		d.SetConfig(cfg)
+		if soundEventState.mode != cfg.Mode {
+			log.Printf("[soundevent] mode now %q", cfg.Mode)
+		}
+		soundEventState.mode = cfg.Mode
+		return
+	}
+	playing := func() bool {
+		return spk != nil && (spk.VoiceAudible(0) || spk.MusicAudible(0))
+	}
+	d, err := soundevent.Open(cfg, playing, cc.SendSoundEvent)
+	if err != nil {
+		if msg := err.Error(); msg != soundEventState.lastErr {
+			soundEventState.lastErr = msg
+			log.Printf("[soundevent] not started: %v", err)
+		}
+		dc.SetSoundDetector(nil)
+		soundEventState.mode = cfg.Mode
+		return
+	}
+	dc.SetSoundDetector(d)
+	soundEventState.mode, soundEventState.lastErr = cfg.Mode, ""
+	st := d.Drain()
+	log.Printf("[soundevent] %s detection started (%s, %s, xnnpack=%v, threshold %.2f)",
+		cfg.Mode, st.Runtime, st.Model, st.XNNPACK, cfg.Threshold)
 }
 
 // applyShadowConfig starts, stops or re-points on-device wake word scoring from

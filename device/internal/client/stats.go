@@ -56,6 +56,9 @@ type DeviceStats struct {
 	// the same cost class as every other counter here, and the reason
 	// per-frame scores are never sent.
 	OwwShadow interface{} `json:"owwShadow,omitempty"`
+	// SoundDetection is the hazardous-sound detector's window summary. It is
+	// absent when off or when its out-of-band assets could not be loaded.
+	SoundDetection interface{} `json:"soundDetection,omitempty"`
 	// AecRef is which far-end reference echo cancellation is running on:
 	// "hw" (the frame-aligned ch8 playback loopback), "sw" (the tap at the
 	// ALSA write) or "off". The aec_hw_ref capability says this firmware
@@ -104,6 +107,7 @@ func (c *ControlClient) SendStats(s DeviceStats) {
 		"rxCrcErrors":      s.RxCrcErrors,
 		"ble":              s.Ble,
 		"owwShadow":        s.OwwShadow,
+		"soundDetection":   s.SoundDetection,
 		"ambientLux":       s.AmbientLux,
 		"cpuTempC":         s.CPUTempC,
 		"maxTempC":         s.MaxTempC,

@@ -153,6 +153,17 @@ Light** sensor in HA.
 **no entity at all** — not an entity stuck at 0.
 **Flag:** An entity permanently reading 0 or unavailable.
 
+### B7 · Hazardous-sound event
+**Do:** On supported firmware, enable **Diagnostic (shadow)** sound detection
+and play a smoke-alarm test recording near the device. Watch its **Hazardous
+Sound** event entity and **Hazardous Sound Confidence** sensor in HA.
+**Expect:** The confidence updates first, then a `smoke_alarm` event fires.
+Shadow mode still reaches HA; it describes detector mode, not whether HA may
+observe the result. Replaying during the configured cooldown may be coalesced.
+**Flag:** Activity records the incident but HA receives no event, the event
+type is missing from the automation editor, or confidence is stale when the
+event fires.
+
 ---
 
 ## C — Wake word

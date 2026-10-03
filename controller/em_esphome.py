@@ -248,6 +248,8 @@ MEDIA_PLAYER_KEY = 1
 # Append only.
 EVENT_KEY        = 2   # action-button hold, as an HA event entity
 AMBIENT_LUX_KEY  = 3   # TSL2540 ambient light, as an HA sensor
+HAZARD_EVENT_KEY = 4   # confirmed hazardous-sound incidents
+HAZARD_CONFIDENCE_KEY = 5  # confidence for the incident sent immediately after
 
 # Press types the event entity advertises. double/triple were parked because
 # detecting them means delaying the single press by the multi-tap window to
@@ -259,6 +261,17 @@ AMBIENT_LUX_KEY  = 3   # TSL2540 ambient light, as an HA sensor
 # a type added when a setting flipped would not reach HA until reconnect.
 BUTTON_EVENT_TYPES = ["long", "single", "double", "triple"]
 # em_tap_burst decides which of the tap types a given burst becomes.
+
+# One event entity is the natural HA shape for momentary detections. Its
+# event_type lets an automation select the class without inventing a binary
+# sensor reset timeout. Keep these equal to the compact device protocol kinds.
+HAZARD_EVENT_TYPES = [
+    "smoke_alarm",
+    "fire_alarm",
+    "possible_co_alarm",
+    "glass_break",
+    "alarm_unknown",
+]
 
 # How long the action button must be held to count as a hold rather than a
 # tap. Measured ON THE DEVICE (heldMs) rather than by timing the down/up
@@ -530,6 +543,10 @@ class EchoMuseSatellite(SatelliteServerProtocol):
     def _ambient_lux_capable(self) -> bool:
         return self._device_has("ambient_light")
 
+    @property
+    def _sound_events_capable(self) -> bool:
+        return self._device_has("sound_events")
+
     def _voice_assistant_flags(self) -> int:
         """
         Feature flags for DeviceInfoResponse, gated on what the device has.
@@ -660,6 +677,26 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     device_class="illuminance",
                     state_class=1,   # STATE_CLASS_MEASUREMENT
                 )
+            if self._sound_events_capable:
+                yield api_pb2.ListEntitiesEventResponse(
+                    object_id="hazardous_sound",
+                    key=HAZARD_EVENT_KEY,
+                    name="Hazardous Sound",
+                    icon="mdi:alarm-light",
+                    event_types=HAZARD_EVENT_TYPES,
+                )
+                # ESPHome's native EventResponse carries only the event type.
+                # Publish confidence first on the same ordered connection so
+                # an event automation can decide its own action threshold.
+                yield api_pb2.ListEntitiesSensorResponse(
+                    object_id="hazardous_sound_confidence",
+                    key=HAZARD_CONFIDENCE_KEY,
+                    name="Hazardous Sound Confidence",
+                    icon="mdi:percent",
+                    unit_of_measurement="%",
+                    accuracy_decimals=1,
+                    force_update=True,
+                )
             yield api_pb2.ListEntitiesDoneResponse()
             return
 
@@ -667,6 +704,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                              api_pb2.SubscribeHomeAssistantStatesRequest)):
             log.debug(f"[{self._log_name}] {type(msg).__name__} from {self.peer}")
             yield self._media_state_msg()
+            if self._sound_events_capable:
+                yield self._hazard_confidence_msg()
             return
 
         if isinstance(msg, api_pb2.SubscribeVoiceAssistantRequest):
@@ -1171,6 +1210,15 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             state=st,
             volume=self._current_volume,
             muted=self._current_muted,
+        )
+
+    def _hazard_confidence_msg(self) -> "api_pb2.SensorStateResponse":
+        server = self._owning_server
+        confidence = server.hazard_confidence if server is not None else None
+        return api_pb2.SensorStateResponse(
+            key=HAZARD_CONFIDENCE_KEY,
+            state=(confidence * 100.0) if confidence is not None else 0.0,
+            missing_state=confidence is None,
         )
 
     def _announce_play_cb(self):
@@ -2444,6 +2492,9 @@ class DeviceESPhomeServer:
         # HA's output mute; lives on the server so it survives the device
         # reconnecting, which is exactly when it has to be re-applied.
         self.output_mute = em_output_mute.OutputMute()
+        # Last incident confidence (0.0-1.0). The server outlives an HA socket,
+        # so the companion sensor keeps its state across an HA reconnect.
+        self.hazard_confidence: float | None = None
         # Injected by device_connected() — async callable(pcm_bytes) for
         # standalone announce playback (setup wizard, push TTS) when no
         # voice turn is active.
@@ -3398,6 +3449,46 @@ def send_button_event(device_id: str, event_type: str) -> None:
     log.info(f"[esphome.{device_id[-8:]}] action button {event_type} → HA")
     satellite._send_one(api_pb2.EventResponse(
         key=EVENT_KEY,
+        event_type=event_type,
+    ))
+
+
+def send_sound_event(device_id: str, event_type: str, confidence: float) -> None:
+    """Expose every persisted device detection through HA's event entity.
+
+    Shadow mode is intentionally not filtered here. The controller has already
+    validated and deduplicated the incident; Home Assistant decides whether a
+    given type/confidence should cause an action.
+    """
+    if event_type not in HAZARD_EVENT_TYPES:
+        log.warning(f"[esphome] unknown hazardous sound event {event_type!r} dropped")
+        return
+    server = _servers.get(device_id)
+    if server is None:
+        log.warning(
+            f"[esphome] hazardous sound {event_type} dropped — no server for {device_id}"
+        )
+        return
+    server.hazard_confidence = max(0.0, min(1.0, float(confidence)))
+    satellite = server.get_satellite()
+    if satellite is None:
+        log.warning(
+            f"[esphome.{device_id[-8:]}] hazardous sound {event_type} dropped — "
+            "HA not attached"
+        )
+        return
+    log.info(
+        f"[esphome.{device_id[-8:]}] hazardous sound {event_type} "
+        f"({server.hazard_confidence:.3f}) → HA"
+    )
+    # Native API messages share one ordered TCP stream. Send the confidence
+    # first so it is current when HA processes the event trigger.
+    satellite._send_one(api_pb2.SensorStateResponse(
+        key=HAZARD_CONFIDENCE_KEY,
+        state=server.hazard_confidence * 100.0,
+    ))
+    satellite._send_one(api_pb2.EventResponse(
+        key=HAZARD_EVENT_KEY,
         event_type=event_type,
     ))
 

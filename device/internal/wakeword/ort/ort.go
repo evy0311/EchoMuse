@@ -135,6 +135,84 @@ type model struct {
 	out []float32
 }
 
+// Session is a small, generic one-input/one-output float32 ONNX session.
+// It exists for models such as YAMNet's neural classifier, whose published
+// waveform frontend is computed by its caller. Wake-word inference keeps using
+// Inferer above: its three-stage streaming contract is deliberately more
+// specific.
+type Session struct {
+	model   *model
+	version string
+	xnnpack bool
+}
+
+// NewSession opens a one-input/one-output float32 model. The caller supplies
+// the input shape on each Run while retaining the same runtime and
+// execution-provider policy as the wake-word sessions.
+func (r *Runtime) NewSession(path, name string, o Options) (*Session, error) {
+	if o.Threads < 1 {
+		return nil, fmt.Errorf("ort: Threads must be at least 1, got %d", o.Threads)
+	}
+	m, err := r.load(path, name, o)
+	if err != nil {
+		return nil, err
+	}
+	return &Session{model: m, version: r.version, xnnpack: m.m.xnnpack != 0}, nil
+}
+
+// Run evaluates the model. The result aliases storage owned by Session and is
+// overwritten by the next call.
+func (s *Session) Run(input []float32, shape []int64) ([]float32, error) {
+	if s == nil || s.model == nil {
+		return nil, ErrClosed
+	}
+	if len(input) == 0 || len(shape) == 0 {
+		return nil, errors.New("ort: session requires non-empty input and shape")
+	}
+	var n int64 = 1
+	for _, d := range shape {
+		if d <= 0 {
+			return nil, fmt.Errorf("ort: invalid input dimension %d", d)
+		}
+		n *= d
+	}
+	if n != int64(len(input)) {
+		return nil, fmt.Errorf("ort: shape contains %d values, input has %d", n, len(input))
+	}
+	cshape := make([]C.int64_t, len(shape))
+	for i, d := range shape {
+		cshape[i] = C.int64_t(d)
+	}
+	var (
+		outPtr *C.float
+		outN   C.size_t
+	)
+	err := goErr(C.em_model_run(&s.model.m,
+		(*C.float)(unsafe.Pointer(&input[0])), C.size_t(len(input)),
+		&cshape[0], C.size_t(len(cshape)), &outPtr, &outN))
+	if err != nil {
+		return nil, fmt.Errorf("ort: run %s: %w", s.model.name, err)
+	}
+	if outPtr == nil {
+		return nil, fmt.Errorf("ort: run %s: no output", s.model.name)
+	}
+	defer C.free(unsafe.Pointer(outPtr))
+	s.model.out = append(s.model.out[:0], unsafe.Slice((*float32)(unsafe.Pointer(outPtr)), int(outN))...)
+	return s.model.out, nil
+}
+
+func (s *Session) RuntimeVersion() string { return s.version }
+func (s *Session) XNNPACKActive() bool    { return s.xnnpack }
+
+// Close releases the session. It is safe to call twice.
+func (s *Session) Close() error {
+	if s != nil && s.model != nil {
+		C.em_model_free(&s.model.m)
+		s.model = nil
+	}
+	return nil
+}
+
 func (r *Runtime) load(path, name string, o Options) (*model, error) {
 	if path == "" {
 		return nil, fmt.Errorf("ort: no path for the %s model", name)

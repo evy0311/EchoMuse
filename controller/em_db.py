@@ -39,6 +39,13 @@ log = logging.getLogger("echomuse.db")
 # ─── Default device config ────────────────────────────────────────────────────
 
 DEFAULT_DEVICE_CONFIG = {
+    # Hazardous-sound detection is opt-in. "shadow" records candidates for
+    # tuning; "on" marks confirmed detections active. Both stay entirely local
+    # until a compact event is sent to this controller.
+    "soundDetection": "off",
+    "soundDetectionThreshold": 0.5,
+    "soundDetectionConfirmations": 2,
+    "soundDetectionCooldownSec": 60,
     # owwOnDevice: where the wake word is detected (docs/listening.md).
     # "on" — on the Echo, which sends nothing until it hears it; "off" — on
     # the controller, from a continuous stream; "shadow" — both, a streaming
@@ -1085,7 +1092,6 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '28' WHERE key = 'schema_version';
     """,
-
     # ── v29 — labelled wake-word training clips ─────────────────────────────
     """
     CREATE TABLE IF NOT EXISTS wake_samples (
@@ -1118,6 +1124,34 @@ MIGRATIONS: list[str] = [
     ALTER TABLE devices ADD COLUMN emos_build TEXT;
 
     UPDATE system_config SET value = '30' WHERE key = 'schema_version';
+    """,
+
+    # v31 — confirmed/candidate on-device hazardous-sound detections. A
+    # device-local sequence resets on reboot, so idempotence is scoped by the
+    # kernel boot id as well as the device id.
+    """
+    CREATE TABLE IF NOT EXISTS sound_events (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        device_id        TEXT    NOT NULL REFERENCES devices(device_id),
+        ts               REAL    NOT NULL,
+        kind             TEXT    NOT NULL,
+        confidence       REAL    NOT NULL,
+        scores_json      TEXT    NOT NULL DEFAULT '{}',
+        mode             TEXT    NOT NULL,
+        confirmations    INTEGER NOT NULL,
+        cadence          TEXT,
+        evidence_json    TEXT    NOT NULL DEFAULT '{}',
+        playback_active  INTEGER NOT NULL DEFAULT 0,
+        model            TEXT,
+        runtime          TEXT,
+        boot_id          TEXT    NOT NULL,
+        event_sequence   INTEGER NOT NULL,
+        UNIQUE(device_id, boot_id, event_sequence)
+    );
+    CREATE INDEX IF NOT EXISTS idx_sound_events_device_ts
+        ON sound_events(device_id, ts DESC);
+
+    UPDATE system_config SET value = '31' WHERE key = 'schema_version';
     """,
 ]
 
@@ -2393,6 +2427,51 @@ def get_device_logs(
 # Persistent per-turn records + hourly rollups (near-misses, hardware
 # metrics). Written from the voice pipeline via run_in_executor; read by the
 # /api/devices/{id}/turns and /api/devices/{id}/activity endpoints.
+
+def record_sound_event(device_id: str, event: dict) -> bool:
+    """Persist one device event, returning False for a duplicate retry."""
+    with _tx() as conn:
+        cur = conn.execute(
+            """
+            INSERT OR IGNORE INTO sound_events
+              (device_id, ts, kind, confidence, scores_json, mode,
+               confirmations, cadence, evidence_json, playback_active,
+               model, runtime, boot_id, event_sequence)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (device_id, event["ts"], event["kind"], event["confidence"],
+             json.dumps(event.get("scores") or {}, separators=(",", ":")),
+             event["mode"], event["confirmations"], event.get("cadence"),
+             json.dumps(event.get("evidence") or {}, separators=(",", ":")),
+             1 if event.get("playback_active") else 0,
+             event.get("model"), event.get("runtime"), event["boot_id"],
+             event["event_sequence"]),
+        )
+        return cur.rowcount == 1
+
+
+def get_sound_events(device_id: str, limit: int = 200,
+                     since: float | None = None) -> list[dict]:
+    """Newest-first sound detections with JSON evidence decoded."""
+    limit = max(1, min(int(limit), 1000))
+    if since is None:
+        rows = _q(
+            "SELECT * FROM sound_events WHERE device_id = ? ORDER BY ts DESC LIMIT ?",
+            (device_id, limit),
+        )
+    else:
+        rows = _q(
+            "SELECT * FROM sound_events WHERE device_id = ? AND ts >= ? "
+            "ORDER BY ts DESC LIMIT ?", (device_id, since, limit),
+        )
+    out = []
+    for row in rows:
+        item = dict(row)
+        item["scores"] = json.loads(item.pop("scores_json") or "{}")
+        item["evidence"] = json.loads(item.pop("evidence_json") or "{}")
+        item["playback_active"] = bool(item["playback_active"])
+        out.append(item)
+    return out
 
 # Turn dict keys ↔ column names. "trigger" is the dict key used everywhere
 # in the pipeline and API (matches the pre-persistence turn_record shape);

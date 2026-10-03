@@ -16,6 +16,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/listen"
 	"github.com/wilbowes/EchoMuse/internal/processor"
+	"github.com/wilbowes/EchoMuse/internal/soundevent"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/ort"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/shadow"
 	"github.com/wilbowes/EchoMuse/pkg/mic"
@@ -238,6 +239,10 @@ type DataClient struct {
 	// goroutine is pushing frames into it.
 	shadowMu     sync.Mutex
 	shadowScorer *shadow.Scorer
+	// soundDetector independently consumes the same processed 80ms PCM as the
+	// wake scorer. Its bounded queue makes this pointer tap non-blocking.
+	soundMu       sync.Mutex
+	soundDetector *soundevent.Detector
 
 	// listenGate decides what of the wake stream may leave the device when
 	// listenState is ListenLocal. Always present; idle in the other states.
@@ -433,6 +438,25 @@ func (d *DataClient) ShadowScorer() *shadow.Scorer {
 	d.shadowMu.Lock()
 	defer d.shadowMu.Unlock()
 	return d.shadowScorer
+}
+
+// SetSoundDetector atomically replaces hazardous-sound analysis. Close is
+// performed after the pointer swap so the capture goroutine can never acquire
+// a detector that is about to be published as current.
+func (d *DataClient) SetSoundDetector(next *soundevent.Detector) {
+	d.soundMu.Lock()
+	old := d.soundDetector
+	d.soundDetector = next
+	d.soundMu.Unlock()
+	if old != nil {
+		old.Close()
+	}
+}
+
+func (d *DataClient) SoundDetector() *soundevent.Detector {
+	d.soundMu.Lock()
+	defer d.soundMu.Unlock()
+	return d.soundDetector
 }
 
 // SetListenState switches between streaming, private listening and degraded.
@@ -1316,6 +1340,9 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 					// push can swap the scorer mid-stream and close the old one.
 					if sc := d.ShadowScorer(); sc != nil {
 						sc.PushBytesAt(chunk, at)
+					}
+					if det := d.SoundDetector(); det != nil {
+						det.PushBytesAt(chunk, at)
 					}
 					switch state {
 					case ListenLocal:

@@ -61,6 +61,7 @@ import contextlib
 import hmac
 import json
 import logging
+import math
 import os
 import socket
 import struct
@@ -437,6 +438,7 @@ class Device:
         self.kernel_arch: str | None = None
         # From the register message (schema v28): see em_health.
         self.boot_reason: str | None = None
+        self.boot_id: str = ""
         # The last eMMC wear row written, as (day, values), so a reading that
         # has not changed since is not rewritten every stats tick.
         self.wear_written: tuple | None = None
@@ -1052,6 +1054,11 @@ class Device:
     def volume_cue_capable(self) -> bool:
         """Whether physical volume changes can play an idle preview tone."""
         return "volume_cue" in (self.capabilities or [])
+
+    @property
+    def sound_events_capable(self) -> bool:
+        """Whether firmware can run and report local sound classification."""
+        return "sound_events" in (self.capabilities or [])
 
     @property
     def oww_trigger_capable(self) -> bool:
@@ -4110,6 +4117,61 @@ def _not_from_control(device: "Device", ws, secure: bool) -> str | None:
     )
 
 
+_SOUND_EVENT_KINDS = {
+    "smoke_alarm", "fire_alarm", "possible_co_alarm", "glass_break",
+    "alarm_unknown",
+}
+
+
+async def _handle_sound_event(device: Device, msg: dict) -> None:
+    """Validate and idempotently persist one compact device detection."""
+    if not device.sound_events_capable:
+        log.warning(f"[{device.device_id}] sound_event without capability ignored")
+        return
+    try:
+        kind = str(msg["kind"])
+        mode = str(msg["mode"])
+        confidence = float(msg["confidence"])
+        confirmations = int(msg["confirmations"])
+        sequence = int(msg["sequence"])
+        age_ms = max(0, min(30_000, int(msg.get("ageMs") or 0)))
+    except (KeyError, TypeError, ValueError):
+        log.warning(f"[{device.device_id}] malformed sound_event dropped")
+        return
+    if (kind not in _SOUND_EVENT_KINDS or mode not in {"shadow", "on"}
+            or not math.isfinite(confidence) or confidence < 0 or confidence > 1
+            or confirmations < 1 or sequence < 1 or not device.boot_id):
+        log.warning(f"[{device.device_id}] invalid sound_event dropped")
+        return
+    scores = msg.get("scores") if isinstance(msg.get("scores"), dict) else {}
+    scores = {str(k): float(v) for k, v in scores.items()
+              if isinstance(v, (int, float)) and not isinstance(v, bool)
+              and math.isfinite(float(v))}
+    evidence = msg.get("evidence") if isinstance(msg.get("evidence"), dict) else {}
+    event = {
+        "ts": time.time() - age_ms / 1000.0,
+        "kind": kind, "confidence": confidence, "scores": scores,
+        "mode": mode, "confirmations": confirmations,
+        "cadence": str(msg.get("cadence") or "unknown"),
+        "evidence": evidence, "playback_active": bool(msg.get("playbackActive")),
+        "model": str(msg.get("model") or ""),
+        "runtime": str(msg.get("runtime") or ""),
+        "boot_id": device.boot_id, "event_sequence": sequence,
+    }
+    inserted = await asyncio.get_event_loop().run_in_executor(
+        None, db.record_sound_event, device.device_id, event)
+    if not inserted:
+        return
+    event["device_id"] = device.device_id
+    # A momentary HA event entity is the right shape here: no synthetic
+    # binary-sensor reset timeout, and both shadow/on detections reach HA so
+    # the automation author can choose a confidence threshold and response.
+    esphome.send_sound_event(device.device_id, kind, confidence)
+    await api._push_event({"type": "sound_event", "event": event})
+    log.info(f"[{device.device_id}] sound event {kind}: {confidence:.3f} "
+             f"({mode}{', playback active' if event['playback_active'] else ''})")
+
+
 async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
     """
     Handle a /control WebSocket connection from a device.
@@ -4242,6 +4304,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         # the dashboard shows them without a query. Absent on older firmware.
         device.boot_reason = msg.get("boot_reason") or None
         if isinstance(msg.get("boot_id"), str) and msg["boot_id"]:
+            device.boot_id = msg["boot_id"]
             em_dbwriter.submit(db.record_boot, device_id, msg["boot_id"],
                                msg.get("version"), device.boot_reason)
         _note_wear(device, msg.get("emmc"))
@@ -4661,6 +4724,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                             # device is not scoring (see the allowlist note above:
                             # DeviceStats, here, and the consumer below).
                             "owwShadow":     msg.get("owwShadow"),
+                            "soundDetection": msg.get("soundDetection"),
                             # Which far-end reference the AEC is on: "hw",
                             # "sw", "off", or absent from firmware that
                             # cannot say. Deliberately NOT added to
@@ -4890,6 +4954,9 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                             f"score={msg.get('score')} age={msg.get('ageMs')}ms "
                             f"(shadow — not triggering)"
                         )
+
+                    elif msg_type == "sound_event":
+                        await _handle_sound_event(device, msg)
 
                     elif msg_type == "oww_wake":
                         # On-device scoring crossed the bar AND owwOnDevice is

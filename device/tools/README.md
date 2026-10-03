@@ -159,3 +159,25 @@ Flags exist for `-threads`, `-xnnpack` and `-spinning` so the measured
 optimum can be re-derived on the hardware rather than trusted: on an Echo Dot
 Gen 2, one thread with XNNPACK and spinning **off** cost 36.2% of one core,
 where ORT's defaults cost 243%.
+
+---
+
+# yamnet_probe — hazardous-sound model gate
+
+Build with `tools/build_tools.sh`, install the binary plus
+`yamnet_classifier.onnx`, `yamnet_class_map.csv`, an S16LE 16 kHz mono fixture,
+and the ARMv7 ONNX runtime on the test Echo, then run:
+
+```bash
+/data/local/tmp/yamnet_probe -fixture /data/local/tmp/alarm_fixture.pcm -seconds 180
+```
+
+It validates the 521-class output and required class names, rejects non-finite
+scores, prints every selected target score, and reports p50/p95/max latency,
+480ms deadline overruns, CPU, peak RSS, and whether XNNPACK attached. A host
+run is useful for correctness but is not a hardware acceptance result.
+
+The firmware computes the official YAMNet log-mel frontend in Go and the ONNX
+asset contains only the neural classifier. `export_yamnet.py` produces the
+pinned asset; the full waveform graph is not supported by the Echo ARMv7
+runtime.
