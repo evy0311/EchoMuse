@@ -1271,6 +1271,9 @@ func capabilities() []string {
 	// HA's "No wake word" for a privately listening Echo, which would
 	// otherwise keep sending audio on every wake until the close arrived.
 	//
+	// "remote_volume_arc": this firmware can show the existing cyan level arc
+	// for live remote volume changes when remoteVolumeArc is enabled. The
+	// setting is off by default, and boot-time volume restore stays silent.
 	// "response_level": this firmware can apply the configured relative gain
 	// to the voice plane before it is mixed with music (#636).
 	//
@@ -1289,7 +1292,8 @@ func capabilities() []string {
 	// sendspin status, for the aec_hw_ref reason.
 	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons",
 		"oww_shadow", "oww_trigger", "button_hold", "audio_mix",
-		"aec_hw_ref", "oww_local_only", "output_chain", "wake_cue", "volume_cue", "response_level", "pairing",
+		"aec_hw_ref", "oww_local_only", "output_chain", "wake_cue", "volume_cue", "remote_volume_arc",
+		"response_level", "pairing",
 		"wake_word_off", "sendspin", "ble_connect"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")

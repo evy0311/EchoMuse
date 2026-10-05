@@ -1090,6 +1090,11 @@ class Device:
         return "volume_cue" in (self.capabilities or [])
 
     @property
+    def remote_volume_arc_capable(self) -> bool:
+        """Whether remote volume changes can show the cyan level arc (#634)."""
+        return "remote_volume_arc" in (self.capabilities or [])
+
+    @property
     def response_level_capable(self) -> bool:
         """Whether firmware can apply the relative voice-response gain."""
         return "response_level" in (self.capabilities or [])
