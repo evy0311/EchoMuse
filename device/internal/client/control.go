@@ -1266,6 +1266,10 @@ func capabilities() []string {
 	//
 	// "volume_cue": this firmware can play a physical-button volume preview
 	// at the new level, and suppress it while voice or music is audible.
+	// "wake_word_off": this firmware honours wakeWordEnabled=false (#286),
+	// so a crossing opens no session. Without it the controller declines
+	// HA's "No wake word" for a privately listening Echo, which would
+	// otherwise keep sending audio on every wake until the close arrived.
 	//
 	// "pairing": this firmware asks to pair itself when its owner holds the
 	// action button 5 s (pairing.go). Without it the controller offers the
@@ -1283,7 +1287,7 @@ func capabilities() []string {
 	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons",
 		"oww_shadow", "oww_trigger", "button_hold", "audio_mix",
 		"aec_hw_ref", "oww_local_only", "output_chain", "wake_cue", "volume_cue", "pairing",
-		"sendspin", "ble_connect"}
+		"wake_word_off", "sendspin", "ble_connect"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}
