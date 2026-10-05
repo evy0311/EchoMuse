@@ -1862,6 +1862,15 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                         f"{warmup.progress()} chunks since reset"
                     )
                     fired = False
+                if fired and not em_wakeword.wake_allowed(
+                        mic_muted=device.muted,
+                        enabled=device.wake_word_enabled):
+                    # The stream is up for a turn HA or the button started.
+                    # An Echo detecting its own wake word drops this crossing
+                    # itself; this is the same rule for the ones scored here.
+                    log.info(f"[{device.device_id}] barge {score:.3f} suppressed — "
+                             f"{'muted' if device.muted else 'wake word off'}")
+                    fired = False
                 # A playback barge fires on the second of two frames; the
                 # utterance was heard at the first.
                 fired_heard = (prev_heard if in_playback and prev_heard is not None
@@ -2969,7 +2978,9 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown",
                     # to a follow-up rides a bounded turn stream, exactly as
                     # a button press does — the user is expected to speak,
                     # and it ends at their end of speech.
-                    if device.private_listening:
+                    if em_wakeword.follow_up_needs_turn_stream(
+                            private=device.private_listening,
+                            enabled=device.wake_word_enabled):
                         await device.mic_stop()
                         await device.mic_start_turn()
                     else:
@@ -3432,6 +3443,7 @@ async def _stream_listen(device: Device):
     nm_pending = 0    # near-misses buffered since the last hourly-rollup flush
     nm_max     = 0.0  # highest buffered near-miss score
     dead_streak = 0   # consecutive 10s mic_queue timeouts (resets on any frame)
+    stray_stopped_at = 0.0  # last mic_stop sent for a stream up with the wake word off
     try:
         while True:
             # Now that the model is shared via the module cache (#512), a
@@ -3613,6 +3625,15 @@ async def _stream_listen(device: Device):
                                             enabled=device.wake_word_enabled):
                 buf.clear()
                 device.wake_levels.clear()
+                if (em_wakeword.stray_stream(mic_muted=device.muted,
+                                             enabled=device.wake_word_enabled)
+                        and loop.time() - stray_stopped_at > 2.0):
+                    # Once per 2s: frames already in flight keep arriving
+                    # for a moment after the stop.
+                    stray_stopped_at = loop.time()
+                    log.info(f"[{device.device_id}] audio arriving with the "
+                             f"wake word off — stopping the stream")
+                    await device.mic_stop()
                 continue
 
             buf.extend(payload)
